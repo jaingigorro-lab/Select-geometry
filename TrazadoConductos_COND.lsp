@@ -47,6 +47,9 @@
   result
 )
 
+;; AutoLISP no trae TAN por defecto (solo sin/cos/atan).
+(defun tan (x) (/ (sin x) (cos x)))
+
 ;; Normaliza un angulo en radianes al rango (-pi, pi].
 (defun norm-pi (a)
   (while (> a pi) (setq a (- a (* 2.0 pi))))
@@ -272,8 +275,15 @@
   ;; continuo por defecto, sin que eso afecte al resto del comando.
   (setq offsets (append (offset-curve plEnt half) (offset-curve plEnt (- half))))
 
-  (vl-catch-all-apply 'command (list "_.-LINETYPE" "_Load" "CENTER" "acad.lin" ""))
-  (vl-catch-all-apply 'vla-put-Linetype (list (vlax-ename->vla-object plEnt) "CENTER"))
+  ;; Cargar un tipo de linea con "-LINETYPE Load" puede abrir un cuadro
+  ;; de dialogo de seleccion de archivo (si FILEDIA=1) y quedarse
+  ;; esperando esa ventana en vez del texto que se le pasa por comando
+  ;; -asi que, en vez de arriesgarse a eso, solo se aplica "CENTER" si
+  ;; ya esta cargado en el dibujo; si no lo esta, se deja la linea de
+  ;; eje en el tipo de linea continuo por defecto.
+  (if (tblsearch "LTYPE" "CENTER")
+    (vl-catch-all-apply 'vla-put-Linetype (list (vlax-ename->vla-object plEnt) "CENTER"))
+  )
 
   (if offsets
     (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado con " (itoa (max 0 (- n 2))) " codo(s)"
