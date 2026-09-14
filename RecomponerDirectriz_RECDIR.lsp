@@ -20,6 +20,13 @@
 ;; suelto original, una vez copiado su contenido al MULTILEADER, se
 ;; borra para no dejar un texto duplicado en el dibujo.
 ;;
+;; Con VARIAS directrices seleccionadas a la vez (para ir mas rapido),
+;; el emparejamiento texto<->linea<->flecha se calcula de forma GLOBAL
+;; por distancia -no texto a texto en el orden en que se selecciono cada
+;; uno-, precisamente para que directrices muy juntas (varias tomas de
+;; un mismo equipo, por ejemplo) no se "roben" entre si la cadena o la
+;; flecha que le corresponde a la vecina.
+;;
 ;; Uso:
 ;;   1. Ejecutar RECDIR.
 ;;   2. Seleccionar TODO de una vez: los textos, las lineas/polilineas
@@ -224,10 +231,12 @@
 (defun c:RECDIR
   ( / doc modelSpace ss n i ent edata etype textList lineList solidList
       allSegs chains availableStyles currentStyle chosenStyle
-      txtEnt txtObj txtStr txtHeight txtPt bestChain bestDist c d0 d1
-      arrowPt chainUCS p usedLines usedTexts
-      solidEnt solidClosest solidClosestDist solPt dd
-      mlEnt mlObj usedSolids doneCount)
+      textInfos txtEnt txtObj txtStr txtHeight txtPt
+      candidates cand ti ti2 ch te d0 d1
+      assignedText assignedChain assignment bestChain
+      chainUCS p usedLines usedTexts arrowInfos ai arrowPt
+      mlEnt mlObj doneCount
+      solidEnt solidCandidates scand solidClosest usedArrowInfos usedSolidEnts dd)
 
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq modelSpace (vla-get-ModelSpace doc))
@@ -293,11 +302,21 @@
     (vl-catch-all-apply 'setvar (list "CMLEADERSTYLE" chosenStyle))
   )
 
-  (setq usedSolids '())
-  (setq usedLines '())
-  (setq usedTexts '())
-  (setq doneCount 0)
-
+  ;; --- Emparejamiento texto <-> cadena, GLOBAL y no secuencial ---
+  ;; Con varias directrices muy juntas (varias tomas de un mismo equipo,
+  ;; como un manojo de conductos convergiendo en un punto), emparejar
+  ;; cada texto con su cadena mas cercana UNO A UNO Y EN EL ORDEN DE
+  ;; SELECCION hacia que un texto le "robara" a otro posterior la cadena
+  ;; que en realidad era de ese otro -dejandolo sin ninguna, o haciendo
+  ;; que cogiera una equivocada de mas lejos-. Eso es lo que se notaba
+  ;; como directrices que no llegaban a generarse, o que aparecian con el
+  ;; texto "desplazado" a la cadena de la directriz vecina. Para evitarlo,
+  ;; se calculan TODAS las distancias texto-cadena posibles y se
+  ;; emparejan de la mas cercana a la mas lejana, sin repetir ni texto ni
+  ;; cadena ya usados: asi cada cadena va, con preferencia, al texto que
+  ;; de verdad tiene mas cerca en todo el lote, y no solo al primero que
+  ;; la pidio.
+  (setq textInfos '())
   (foreach txtEnt textList
     (setq txtObj (vlax-ename->vla-object txtEnt))
     ;; vla-get-TextString funciona igual para TEXT y para MTEXT (en este
@@ -308,22 +327,49 @@
     (setq txtHeight (cdr (assoc 40 edata)))
     (if (not txtHeight) (setq txtHeight 2.5))
     (setq txtPt (trans (cdr (assoc 10 edata)) txtEnt 0))
+    (setq textInfos (cons (list txtEnt txtStr txtHeight txtPt) textInfos))
+  )
 
-    ;; Cadena mas cercana a este texto (por cualquiera de sus dos extremos).
-    (setq bestChain nil)
-    (setq bestDist 1e99)
-    (foreach c chains
-      (setq d0 (distance txtPt (car c)))
-      (setq d1 (distance txtPt (last c)))
-      (if (< (min d0 d1) bestDist)
-        (progn (setq bestDist (min d0 d1)) (setq bestChain c))
+  (setq candidates '())
+  (foreach ti textInfos
+    (foreach ch chains
+      (setq d0 (distance (nth 3 ti) (car ch)))
+      (setq d1 (distance (nth 3 ti) (last ch)))
+      (setq candidates (cons (list (min d0 d1) ti ch) candidates))
+    )
+  )
+  (setq candidates (vl-sort candidates '(lambda (a b) (< (car a) (car b)))))
+
+  (setq assignedText '())
+  (setq assignedChain '())
+  (setq assignment '())
+  (foreach cand candidates
+    (setq ti2 (cadr cand))
+    (setq ch (caddr cand))
+    (setq te (car ti2))
+    (if (and (not (member te assignedText)) (not (member ch assignedChain)))
+      (progn
+        (setq assignedText (cons te assignedText))
+        (setq assignedChain (cons ch assignedChain))
+        (setq assignment (cons (cons te ch) assignment))
       )
     )
+  )
+
+  (setq usedLines '())
+  (setq usedTexts '())
+  (setq arrowInfos '())
+  (setq doneCount 0)
+
+  (foreach ti textInfos
+    (setq txtEnt (car ti))
+    (setq txtStr (cadr ti))
+    (setq txtHeight (caddr ti))
+    (setq txtPt (nth 3 ti))
+    (setq bestChain (cdr (assoc txtEnt assignment)))
 
     (if bestChain
       (progn
-        (setq chains (vl-remove bestChain chains))
-
         ;; Orientar la cadena: el extremo que se conecta con el texto (el
         ;; mas cercano a el) queda al final -asi el ultimo punto que se
         ;; envia a MLEADER es el enganche, y el primero, la punta de
@@ -361,33 +407,43 @@
 
             (setq usedLines (append usedLines (entities-for-chain bestChain lineList *recdir-chain-tolerance*)))
             (setq usedTexts (cons txtEnt usedTexts))
+            (setq arrowInfos (cons (list arrowPt (* *recdir-arrow-cleanup-factor* txtHeight)) arrowInfos))
             (setq doneCount (1+ doneCount))
-
-            ;; Buscar y borrar una punta de flecha suelta (SOLID/INSERT)
-            ;; que haya quedado junto al extremo de la flecha.
-            (setq solidClosest nil solidClosestDist 1e99)
-            (foreach solidEnt solidList
-              (if (not (member solidEnt usedSolids))
-                (progn
-                  (setq solPt (trans (cdr (assoc 10 (entget solidEnt))) solidEnt 0))
-                  (setq dd (distance arrowPt solPt))
-                  (if (< dd solidClosestDist)
-                    (progn (setq solidClosestDist dd) (setq solidClosest solidEnt))
-                  )
-                )
-              )
-            )
-            (if (and solidClosest (< solidClosestDist (* *recdir-arrow-cleanup-factor* txtHeight)))
-              (progn
-                (entdel solidClosest)
-                (setq usedSolids (cons solidClosest usedSolids))
-              )
-            )
           )
           (princ (strcat "\n[RECDIR] Aviso: no se pudo crear el MULTILEADER para el texto \"" txtStr "\"."))
         )
       )
       (princ (strcat "\n[RECDIR] Aviso: no se ha encontrado ninguna cadena de lineas para el texto \"" txtStr "\"."))
+    )
+  )
+
+  ;; --- Limpieza de puntas de flecha sueltas (SOLID/INSERT), tambien por
+  ;; emparejamiento GLOBAL en vez de "la primera libre que pille cada
+  ;; directriz segun se va creando" -mismo motivo que arriba: con varias
+  ;; flechas juntas, una directriz podia borrar la flecha de la vecina y
+  ;; dejar la suya propia sin borrar. ---
+  (setq solidCandidates '())
+  (foreach ai arrowInfos
+    (foreach solidEnt solidList
+      (setq dd (distance (car ai) (trans (cdr (assoc 10 (entget solidEnt))) solidEnt 0)))
+      (if (< dd (cadr ai))
+        (setq solidCandidates (cons (list dd ai solidEnt) solidCandidates))
+      )
+    )
+  )
+  (setq solidCandidates (vl-sort solidCandidates '(lambda (a b) (< (car a) (car b)))))
+
+  (setq usedArrowInfos '())
+  (setq usedSolidEnts '())
+  (foreach scand solidCandidates
+    (setq ai (cadr scand))
+    (setq solidClosest (caddr scand))
+    (if (and (not (member ai usedArrowInfos)) (not (member solidClosest usedSolidEnts)))
+      (progn
+        (entdel solidClosest)
+        (setq usedArrowInfos (cons ai usedArrowInfos))
+        (setq usedSolidEnts (cons solidClosest usedSolidEnts))
+      )
     )
   )
 
