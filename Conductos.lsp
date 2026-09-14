@@ -557,14 +557,17 @@
 
   (setq boundaries (append boundaries (list (last pts))))
 
-  ;; Tramos rectos: cada PAR de puntos consecutivos de "boundaries" es
-  ;; un tramo recto de conducto, con sus dos paredes desfasadas +/-
-  ;; media dimension.
+  ;; "boundaries" alterna HUECO-DE-TRAMO-RECTO, HUECO-DE-CODO, tramo,
+  ;; codo, ..., tramo: (inicio, p1-codo1, p2-codo1, p1-codo2, p2-codo2,
+  ;; ..., fin). Los pares que empiezan en indice PAR (0,2,4...) son
+  ;; tramos rectos de pared; los que empiezan en indice IMPAR son el
+  ;; hueco que ya ocupa el bloque del codo -ahi NO hay que dibujar
+  ;; nada, o saldria una pared diagonal atravesando el propio codo-.
   (setq i 0)
   (while (< i (1- (length boundaries)))
     (setq a (nth i boundaries))
     (setq v (nth (1+ i) boundaries))
-    (if (> (distance a v) 1e-6)
+    (if (and (= (rem i 2) 0) (> (distance a v) 1e-6))
       (progn
         (setq segCL (make-polyline (list a v)))
         (setq off1 (offset-curve segCL half))
