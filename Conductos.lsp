@@ -4,14 +4,21 @@
 ;; CONDUCTOS - Herramientas de trazado de conductos de climatizacion.
 ;;
 ;; CONDUCTO - Traza un recorrido de conducto (circular o rectangular)
-;;   a doble linea y a escala real, insertando en cada cambio de
-;;   direccion el codo normalizado correspondiente:
-;;     - Circular: codo curvo con radio 1.5 x diametro (SMACNA),
-;;       tangente a los dos tramos que conecta.
-;;     - Rectangular: codo a escuadra (mitrado a 90), sin radio -la
-;;       esquina recta habitual en conducto rectangular de chapa-.
-;;   En ambos casos se avisa (sin bloquear el dibujo) si el angulo de
-;;   un codo no es uno de los normalizados habituales.
+;;   a doble linea y a escala real. En cada cambio de direccion NO se
+;;   deja simplemente una esquina redondeada o mitrada: se inserta un
+;;   BLOQUE de codo normalizado (con atributos DIAM/ANCHO, ANG y TIPO),
+;;   al estilo de una pieza de catalogo -para poder contarlos despues
+;;   en una lista de materiales, no solo dibujarlos-:
+;;     - Circular: codo curvo con radio 1.5 x diametro (SMACNA).
+;;     - Rectangular: codo a escuadra (90), sin radio.
+;;   El bloque se crea UNA vez por cada combinacion de tipo+dimension+
+;;   angulo que aparezca en el dibujo (se reutiliza si ya existe), y
+;;   se inserta orientado y, si el giro es hacia el otro lado, espejado
+;;   -no hace falta un bloque distinto para cada mano-. Los tramos
+;;   rectos de pared se generan por separado, ya recortados para
+;;   encajar exactamente con cada codo. Se avisa (sin bloquear el
+;;   dibujo) si el angulo de un codo no es uno de los normalizados
+;;   habituales.
 ;;
 ;;   Uso:
 ;;     1. Ejecutar CONDUCTO.
@@ -24,10 +31,10 @@
 ;;        comando. En rectangular se activa ORTHO automaticamente
 ;;        mientras se traza, para que el angulo salga a 90 sin tener
 ;;        que acordarse de activarlo (se puede saltar con MAYUS).
-;;     4. El comando genera el doble contorno del conducto con los
-;;        codos ya insertados, y conserva la polilinea de eje central
-;;        usada como base, en gris y con linea de trazo-punto
-;;        "CENTER".
+;;     4. El comando genera los tramos rectos de pared y los bloques
+;;        de codo en cada vertice, y conserva la polilinea de eje
+;;        central trazada (sin redondear) como referencia, en gris y
+;;        con linea de trazo-punto "CENTER".
 ;;
 ;; CONDUCTORAMAL - Inserta una union en T (un ramal) o en cruz (dos
 ;;   ramales opuestos) sobre un conducto principal YA EXISTENTE
@@ -36,7 +43,9 @@
 ;;   NO se modifica: solo se lee para saber su ancho/diametro y por
 ;;   donde pasa. Cada ramal se traza con su propio tipo y dimension, y
 ;;   sus dos paredes se recortan automaticamente justo donde alcanzan
-;;   la pared del conducto principal mas cercana a el.
+;;   la pared del conducto principal mas cercana a el. (Esta union no
+;;   se genera todavia como pieza/bloque con atributos, solo como
+;;   geometria -a diferencia de los codos de CONDUCTO-.)
 ;;
 ;;   Limitacion: la union debe hacerse sobre un tramo RECTO del
 ;;   conducto principal, no sobre un codo.
@@ -57,6 +66,13 @@
 ;; Radio de los codos circulares = este factor x el diametro (1.5xD,
 ;; el estandar SMACNA habitual para codos de conducto circular).
 (setq *conducto-radius-factor* 1.5)
+
+;; Longitud de cada "pata" del codo a escuadra rectangular = este
+;; factor x el ancho del conducto. No hay una formula fisica unica
+;; para esto (a diferencia del radio circular): es solo el tamano que
+;; se le da al bloque de la pieza para que tenga cuerpo visible y se
+;; pueda etiquetar/contar; ajustalo si tu taller usa otra medida.
+(setq *conducto-rect-elbow-leg-factor* 1.0)
 
 ;; Angulos de codo normalizados (en grados) para conducto circular.
 (setq *conducto-standard-angles* (list 90.0 45.0 30.0 22.5 15.0))
@@ -108,6 +124,19 @@
   (list best bestd)
 )
 
+;; Componente Z de v1 x v2, para dos vectores 2D -su signo dice si hay
+;; que girar a la izquierda (positivo) o a la derecha (negativo) de v1
+;; a v2.
+(defun cross-2d (v1 v2)
+  (- (* (car v1) (cadr v2)) (* (cadr v1) (car v2)))
+)
+
+;; Convierte un numero en un fragmento de texto valido para un nombre
+;; de bloque (sin el punto decimal, que no esta permitido).
+(defun num-tag (x)
+  (vl-string-subst "_" "." (rtos x 2 1))
+)
+
 ;; Vertices (2D, en orden) de una LWPOLYLINE.
 (defun get-polyline-points (ent / obj coordsList pts i n)
   (setq obj (vlax-ename->vla-object ent))
@@ -124,8 +153,7 @@
 
 ;; Quita de una lista de puntos los duplicados consecutivos y los
 ;; vertices intermedios que no representan un cambio de direccion real
-;; (practicamente colineales) -para que FILLET no se encuentre un
-;; vertice "recto" al intentar redondearlos todos de una vez.
+;; (practicamente colineales).
 (defun simplify-points (pts tol / result i n prev cur nxt)
   (setq result (list (car pts)))
   (setq n (length pts))
@@ -194,8 +222,7 @@
 
 ;; Marca una entidad como "linea de eje": gris (color ACI 8) y linea de
 ;; trazo-punto "CENTER" si se ha podido cargar. Informa por pantalla de
-;; si alguno de los dos ajustes no ha surtido efecto, para no depender
-;; de adivinar por que "no se ve gris" si vuelve a fallar.
+;; si alguno de los dos ajustes no ha surtido efecto.
 (defun mark-as-axis (ent / obj ltRes colRes)
   (setq obj (vlax-ename->vla-object ent))
   (if (ensure-center-linetype)
@@ -230,30 +257,163 @@
 )
 
 ;; Interseccion de la recta que pasa por p1 con direccion dir1, y la
-;; que pasa por p2 con direccion dir2 (rectas infinitas). nil si son
-;; paralelas.
+;; que pasa por p2 con direccion dir2 (rectas infinitas, en angulos).
+;; nil si son paralelas.
 (defun line-intersect (p1 dir1 p2 dir2)
   (inters p1 (polar p1 dir1 1.0) p2 (polar p2 dir2 1.0) nil)
 )
 
-;; True si la LWPOLYLINE ent tiene al menos un vertice con bulge
-;; (arco) distinto de cero -para comprobar que un FILLET de polilinea
-;; realmente ha redondeado algo, en vez de dar por hecho que ha
-;; funcionado solo porque el comando no ha dado ningun error.
-(defun has-bulge (ent / edata found pair)
-  (setq edata (entget ent))
-  (setq found nil)
-  (foreach pair edata
-    (if (and (= (car pair) 42) (/= (cdr pair) 0.0)) (setq found T))
+;; --- Bloques de codo normalizado (piezas con atributos) ---
+;;
+;; Cada bloque se construye en un sistema LOCAL propio: se entra por
+;; el punto de insercion (0,0,0) en direccion +X, y el codo gira hacia
+;; la IZQUIERDA "ang" grados. Los giros hacia la derecha se consiguen
+;; espejando el bloque al insertarlo (YScale = -1, ver insert-elbow),
+;; no creando un bloque distinto para cada mano.
+
+(defun elbow-block-name (tipo dim ang)
+  (strcat "CODO_" (if (= tipo "Circular") "CIRC" "RECT") "_D" (num-tag dim) "_A" (num-tag ang))
+)
+
+;; Codo CIRCULAR: dos arcos concentricos (pared exterior/interior) de
+;; radio 1.5xD +/- media dimension, mas 3 atributos (DIAM, ANG, TIPO).
+;; Devuelve el nombre del bloque (creandolo si hace falta), o nil si
+;; algo ha fallado.
+(defun ensure-circular-elbow-block (dim ang / name doc blocks blk R Ttan angRad center outerR innerR attH ok)
+  (setq name (elbow-block-name "Circular" dim ang))
+  (if (tblsearch "BLOCK" name)
+    name
+    (progn
+      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+      (setq blocks (vla-get-Blocks doc))
+      (setq blk (vl-catch-all-apply 'vla-Add (list blocks (list 0.0 0.0 0.0) name)))
+      (setq ok (not (vl-catch-all-error-p blk)))
+      (if ok
+        (progn
+          (setq R (* *conducto-radius-factor* dim))
+          (setq angRad (* ang (/ pi 180.0)))
+          (setq Ttan (* R (tan (/ angRad 2.0))))
+          (setq center (list 0.0 R 0.0))
+          (setq outerR (+ R (/ dim 2.0)))
+          (setq innerR (- R (/ dim 2.0)))
+          (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddArc
+                (list blk center outerR (* 1.5 pi) (+ (* 1.5 pi) angRad))))
+            (setq ok nil)
+          )
+          (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddArc
+                (list blk center innerR (* 1.5 pi) (+ (* 1.5 pi) angRad))))
+            (setq ok nil)
+          )
+          (setq attH (max 1.0 (* dim 0.12)))
+          (vl-catch-all-apply 'vla-AddAttribute
+            (list blk attH 0 "Diametro" (list (+ Ttan (* dim 0.1)) (* dim -0.1) 0.0) "DIAM" (rtos dim 2 0)))
+          (vl-catch-all-apply 'vla-AddAttribute
+            (list blk attH 0 "Angulo" (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0) "ANG" (rtos ang 2 1)))
+          (vl-catch-all-apply 'vla-AddAttribute
+            (list blk attH 0 "Tipo" (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0) "TIPO" "CIRCULAR"))
+        )
+      )
+      (if ok
+        name
+        (progn
+          (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear el bloque de codo \"" name "\"."))
+          nil
+        )
+      )
+    )
   )
-  found
+)
+
+;; Codo RECTANGULAR a escuadra: dos "patas" (cada una de longitud
+;; *conducto-rect-elbow-leg-factor* x ancho) que se encuentran en un
+;; vertice a inglete, con sus dos paredes -mismo calculo de esquina a
+;; inglete que produce un OFFSET, pero resuelto aqui con interseccion
+;; de rectas porque la geometria vive dentro de la definicion del
+;; bloque, no en el espacio modelo-, mas 3 atributos (ANCHO, ANG,
+;; TIPO). Devuelve el nombre del bloque, o nil si algo ha fallado.
+(defun ensure-rect-elbow-block (dim ang / name doc blocks blk angRad Tr half cosA sinA v s
+                                 nearPt vOffset cornerPt farPt attH ok)
+  (setq name (elbow-block-name "Rectangular" dim ang))
+  (if (tblsearch "BLOCK" name)
+    name
+    (progn
+      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+      (setq blocks (vla-get-Blocks doc))
+      (setq blk (vl-catch-all-apply 'vla-Add (list blocks (list 0.0 0.0 0.0) name)))
+      (setq ok (not (vl-catch-all-error-p blk)))
+      (if ok
+        (progn
+          (setq angRad (* ang (/ pi 180.0)))
+          (setq Tr (* *conducto-rect-elbow-leg-factor* dim))
+          (setq half (/ dim 2.0))
+          (setq cosA (cos angRad))
+          (setq sinA (sin angRad))
+          (setq v (list Tr 0.0))
+          (foreach s (list 1.0 -1.0)
+            (setq nearPt (list 0.0 (* s half)))
+            (setq vOffset (list (- Tr (* s half sinA)) (* s half cosA)))
+            (setq cornerPt (line-intersect nearPt 0.0 vOffset angRad))
+            (if cornerPt
+              (progn
+                (setq farPt (list (+ (car vOffset) (* Tr cosA)) (+ (cadr vOffset) (* Tr sinA))))
+                (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddLine
+                      (list blk (append nearPt (list 0.0)) (append cornerPt (list 0.0)))))
+                  (setq ok nil)
+                )
+                (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddLine
+                      (list blk (append cornerPt (list 0.0)) (append farPt (list 0.0)))))
+                  (setq ok nil)
+                )
+              )
+              (setq ok nil)
+            )
+          )
+          (setq attH (max 1.0 (* dim 0.12)))
+          (vl-catch-all-apply 'vla-AddAttribute
+            (list blk attH 0 "Ancho" (list (+ Tr (* dim 0.1)) (* dim -0.1) 0.0) "ANCHO" (rtos dim 2 0)))
+          (vl-catch-all-apply 'vla-AddAttribute
+            (list blk attH 0 "Angulo" (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0) "ANG" (rtos ang 2 1)))
+          (vl-catch-all-apply 'vla-AddAttribute
+            (list blk attH 0 "Tipo" (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0) "TIPO" "RECTANGULAR"))
+        )
+      )
+      (if ok
+        name
+        (progn
+          (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear el bloque de codo \"" name "\"."))
+          nil
+        )
+      )
+    )
+  )
+)
+
+;; Inserta una instancia del bloque de codo "blkName" en insPt, girada
+;; rotAng (radianes, el eje +X local pasa a coincidir con la direccion
+;; de entrada real), y espejada (YScale=-1) si isLeft es nil -los
+;; bloques se construyen siempre para giro a la izquierda-. Devuelve el
+;; objeto insertado, o nil si ha fallado.
+(defun insert-elbow (blkName insPt rotAng isLeft / doc ms result)
+  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (setq ms (vla-get-ModelSpace doc))
+  (setq result (vl-catch-all-apply 'vla-InsertBlock
+                 (list ms (append insPt (list 0.0)) blkName 1.0 (if isLeft 1.0 -1.0) 1.0 rotAng)))
+  (if (vl-catch-all-error-p result)
+    (progn
+      (princ (strcat "\n[CONDUCTO] Aviso: fallo al insertar el codo (" (vl-catch-all-error-message result) ")."))
+      nil
+    )
+    result
+  )
 )
 
 ;; --- CONDUCTO: trazado de un recorrido con codos automaticos ---
 
 (defun c:CONDUCTO
-  ( / tipo diametro ancho beforeEnt plEnt rawPts pts n radius half
-      i a v c defl nearest warnCount tanlen offsets oldOrtho oldTrimmode)
+  ( / tipo diametro ancho dim half beforeEnt plEnt rawPts pts n
+      i a v c defl nearest warnCount tlen oldOrtho
+      boundaries p1 p2 crossSign rotAng blkName inserted nElbows
+      segCL off1 off2 nSegs)
 
   (initget "Circular Rectangular")
   (setq tipo (getkword "\n[CONDUCTO] Tipo de conducto [Circular/Rectangular] <Circular>: "))
@@ -265,22 +425,24 @@
       (if (or (not diametro) (<= diametro 0))
         (progn (princ "\n[CONDUCTO] Cancelado.") (princ) (exit))
       )
+      (setq dim diametro)
     )
     (progn
       (setq ancho (getdist "\n[CONDUCTO] Ancho del conducto (dimension en planta): "))
       (if (or (not ancho) (<= ancho 0))
         (progn (princ "\n[CONDUCTO] Cancelado.") (princ) (exit))
       )
+      (setq dim ancho)
     )
   )
+  (setq half (/ dim 2.0))
 
   ;; Para rectangular, el unico codo que se genera es a escuadra (90),
   ;; asi que se activa ORTHO mientras se traza para que el angulo salga
-  ;; normalizado el solo, sin depender de que el usuario se acuerde de
-  ;; activarlo (se puede seguir saltando puntualmente con MAYUS, y se
+  ;; normalizado el solo (se puede saltar puntualmente con MAYUS, y se
   ;; restaura el ORTHO que hubiera al terminar). Para circular NO se
   ;; fuerza -los codos normalizados admitidos (45/30/22.5/15) no son
-  ;; solo 90, así que forzar ORTHO estorbaria mas de lo que ayuda-.
+  ;; solo 90-.
   (setq oldOrtho (getvar "ORTHOMODE"))
   (if (= tipo "Rectangular") (setvar "ORTHOMODE" 1))
 
@@ -305,111 +467,122 @@
     )
   )
 
-  ;; Se reconstruye la polilinea de eje a partir de los puntos ya
-  ;; "limpios" (sin vertices colineales) para que FILLET, mas abajo,
-  ;; no se encuentre ningun vertice recto al redondearlos todos a la
-  ;; vez con la opcion Polilinea.
   (setq pts (simplify-points rawPts 1e-6))
+
+  ;; La propia polilinea trazada (sin redondear, con sus vertices tal
+  ;; cual) se conserva como eje central de referencia -las paredes del
+  ;; conducto se generan aparte, tramo a tramo, y los codos como
+  ;; bloques, no a partir de esta.
   (entdel plEnt)
   (setq plEnt (make-polyline pts))
+  (mark-as-axis plEnt)
 
   (setq n (length pts))
   (setq warnCount 0)
+  (setq nElbows 0)
+  (setq nSegs 0)
 
-  (if (= tipo "Circular")
-    (progn
-      (setq radius (* *conducto-radius-factor* diametro))
-      (setq half (/ diametro 2.0))
+  ;; "boundaries" es la lista de puntos reales donde empieza/termina
+  ;; cada TRAMO RECTO de pared: el inicio y el fin del recorrido, y los
+  ;; dos puntos de conexion (tangencia en circular, union a inglete en
+  ;; rectangular) de cada codo interior -en vez del vertice en bruto-.
+  (setq boundaries (list (car pts)))
 
-      ;; Avisar de codos con angulo no normalizado, y de tramos
-      ;; demasiado cortos para el radio, ANTES de fileter -una vez
-      ;; fileteados los vertices pasan a ser arcos y ya no se puede
-      ;; leer el angulo original directamente de los puntos.
-      (if (>= n 3)
-        (progn
-          (setq i 1)
-          (while (< i (1- n))
-            (setq a (nth (1- i) pts))
-            (setq v (nth i pts))
-            (setq c (nth (1+ i) pts))
-            (setq defl (deflection-deg a v c))
-            (setq nearest (nearest-standard-angle defl *conducto-standard-angles*))
-            (if (> (cadr nearest) *conducto-angle-warn-tol-deg*)
-              (progn
-                (princ (strcat "\n[CONDUCTO] Aviso: el codo en el vertice " (itoa (1+ i))
-                               " tiene " (rtos defl 2 1) " grados, no es un angulo normalizado ("
-                               (implode-list (mapcar '(lambda (x) (rtos x 2 1)) *conducto-standard-angles*) ", ")
-                               "). Ajusta el recorrido con ORTHO/polar si hace falta."))
-                (setq warnCount (1+ warnCount))
-              )
-            )
-            (setq tanlen (* radius (tan (/ (* defl (/ pi 180.0)) 2.0))))
-            (if (or (> tanlen (distance a v)) (> tanlen (distance v c)))
-              (princ (strcat "\n[CONDUCTO] Aviso: el tramo junto al vertice " (itoa (1+ i))
-                             " puede ser demasiado corto para un codo de radio " (rtos radius 2 1) "."))
-            )
-            (setq i (1+ i))
-          )
-          ;; Fileter TODOS los vertices interiores a la vez con el radio
-          ;; estandar (1.5 x diametro): quedan como arcos tangentes, el
-          ;; codo circular normalizado. La opcion Polilinea de FILLET
-          ;; depende de TRIMMODE para recortar y unir bien los tramos
-          ;; en el arco -si el dibujo lo tuviera a 0 (sin recorte), el
-          ;; redondeo puede no llegar a hacerse-, asi que se fuerza a 1
-          ;; mientras dura el fileteado y se restaura despues.
-          (setq oldTrimmode (getvar "TRIMMODE"))
-          (setvar "TRIMMODE" 1)
-          (command "_.FILLET" "_R" radius "_P" plEnt)
-          (setvar "TRIMMODE" oldTrimmode)
-          (if (not (has-bulge plEnt))
-            (princ "\n[CONDUCTO] Aviso: FILLET no parece haber redondeado ningun vertice del eje -el conducto saldra con esquinas rectas en vez de con codos circulares.")
+  (setq i 1)
+  (while (< i (1- n))
+    (setq a (nth (1- i) pts))
+    (setq v (nth i pts))
+    (setq c (nth (1+ i) pts))
+    (setq defl (deflection-deg a v c))
+
+    (if (= tipo "Circular")
+      (progn
+        (setq nearest (nearest-standard-angle defl *conducto-standard-angles*))
+        (if (> (cadr nearest) *conducto-angle-warn-tol-deg*)
+          (progn
+            (princ (strcat "\n[CONDUCTO] Aviso: el codo en el vertice " (itoa (1+ i))
+                           " tiene " (rtos defl 2 1) " grados, no es un angulo normalizado ("
+                           (implode-list (mapcar '(lambda (x) (rtos x 2 1)) *conducto-standard-angles*) ", ")
+                           "). Ajusta el recorrido con ORTHO/polar si hace falta."))
+            (setq warnCount (1+ warnCount))
           )
         )
+        (setq tlen (* (* *conducto-radius-factor* dim) (tan (/ (* defl (/ pi 180.0)) 2.0))))
       )
-    )
-    (progn
-      (setq half (/ ancho 2.0))
-      ;; Sin fileter: las esquinas se quedan rectas, y el propio OFFSET
-      ;; de una polilinea con esquinas rectas produce automaticamente
-      ;; el codo a escuadra (mitrado) en cada vertice.
-      (if (>= n 3)
-        (progn
-          (setq i 1)
-          (while (< i (1- n))
-            (setq a (nth (1- i) pts))
-            (setq v (nth i pts))
-            (setq c (nth (1+ i) pts))
-            (setq defl (deflection-deg a v c))
-            (if (> (abs (- defl 90.0)) *conducto-angle-warn-tol-deg*)
-              (progn
-                (princ (strcat "\n[CONDUCTO] Aviso: el codo en el vertice " (itoa (1+ i))
-                               " tiene " (rtos defl 2 1) " grados; el codo a escuadra esta pensado para 90. "
-                               "Ajusta el recorrido con ORTHO/polar si hace falta."))
-                (setq warnCount (1+ warnCount))
-              )
-            )
-            (setq i (1+ i))
+      (progn
+        (if (> (abs (- defl 90.0)) *conducto-angle-warn-tol-deg*)
+          (progn
+            (princ (strcat "\n[CONDUCTO] Aviso: el codo en el vertice " (itoa (1+ i))
+                           " tiene " (rtos defl 2 1) " grados; el codo a escuadra esta pensado para 90. "
+                           "Ajusta el recorrido con ORTHO/polar si hace falta."))
+            (setq warnCount (1+ warnCount))
           )
         )
+        (setq tlen (* *conducto-rect-elbow-leg-factor* dim))
       )
     )
+
+    (if (or (> tlen (distance a v)) (> tlen (distance v c)))
+      (princ (strcat "\n[CONDUCTO] Aviso: el tramo junto al vertice " (itoa (1+ i))
+                     " puede ser demasiado corto para el codo (necesita " (rtos tlen 2 1) " a cada lado)."))
+    )
+
+    ;; Puntos de conexion del codo con los tramos rectos vecinos.
+    (setq p1 (polar v (angle v a) tlen))
+    (setq p2 (polar v (angle v c) tlen))
+    (setq boundaries (append boundaries (list p1)))
+
+    ;; Bloque del codo (creado si hace falta, reutilizado si ya existe
+    ;; uno igual), insertado orientado hacia la direccion de entrada, y
+    ;; espejado si el giro es hacia la derecha.
+    (setq crossSign (cross-2d (polar (list 0.0 0.0) (angle a v) 1.0) (polar (list 0.0 0.0) (angle v c) 1.0)))
+    (setq rotAng (angle a v))
+    (setq blkName
+      (if (= tipo "Circular")
+        (ensure-circular-elbow-block dim defl)
+        (ensure-rect-elbow-block dim defl)
+      )
+    )
+    (if blkName
+      (progn
+        (setq inserted (insert-elbow blkName p1 rotAng (>= crossSign 0.0)))
+        (if inserted (setq nElbows (1+ nElbows)))
+      )
+      (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear/insertar el codo del vertice " (itoa (1+ i)) "."))
+    )
+
+    (setq boundaries (append boundaries (list p2)))
+    (setq i (1+ i))
   )
 
-  ;; Doble contorno del conducto: dos desfases simetricos de la
-  ;; polilinea de eje (ya con los codos, circulares o a escuadra, ya
-  ;; resueltos), uno a cada lado. La linea de eje NO se borra: se deja
-  ;; en el dibujo como referencia del recorrido, en gris y con trazo-
-  ;; punto "CENTER" (ver mark-as-axis).
-  (setq offsets (append (offset-curve plEnt half) (offset-curve plEnt (- half))))
+  (setq boundaries (append boundaries (list (last pts))))
 
-  (mark-as-axis plEnt)
-
-  (if offsets
-    (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado con " (itoa (max 0 (- n 2))) " codo(s)"
-                   (if (> warnCount 0) (strcat ", " (itoa warnCount) " con aviso de angulo") "")
-                   ". Eje central conservado."))
-    (princ "\n[CONDUCTO] No se ha podido generar el doble contorno del conducto; se deja la linea de eje para revisar.")
+  ;; Tramos rectos: cada PAR de puntos consecutivos de "boundaries" es
+  ;; un tramo recto de conducto, con sus dos paredes desfasadas +/-
+  ;; media dimension.
+  (setq i 0)
+  (while (< i (1- (length boundaries)))
+    (setq a (nth i boundaries))
+    (setq v (nth (1+ i) boundaries))
+    (if (> (distance a v) 1e-6)
+      (progn
+        (setq segCL (make-polyline (list a v)))
+        (setq off1 (offset-curve segCL half))
+        (setq off2 (offset-curve segCL (- half)))
+        (if (and off1 off2)
+          (setq nSegs (1+ nSegs))
+          (princ "\n[CONDUCTO] Aviso: fallo al generar un tramo recto de pared.")
+        )
+        (entdel segCL)
+      )
+    )
+    (setq i (1+ i))
   )
+
+  (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado: " (itoa nSegs) " tramo(s) recto(s) y "
+                 (itoa nElbows) " codo(s) normalizado(s) insertado(s) como bloque"
+                 (if (> warnCount 0) (strcat ", " (itoa warnCount) " con aviso de angulo") "")
+                 ". Eje central conservado."))
   (princ)
 )
 
@@ -438,9 +611,8 @@
   (setq centerPt (list (/ (+ (car p1) (car p2)) 2.0) (/ (+ (cadr p1) (cadr p2)) 2.0)))
   (setq halfMain (/ (distance p1 p2) 2.0))
   ;; p1-p2 es, para un tramo recto, perpendicular al eje del conducto
-  ;; principal (es la linea que une los dos pies de perpendicular desde
-  ;; el mismo punto de union a cada pared paralela) -sirve tal cual
-  ;; como referencia para comprobar si un ramal sale perpendicular.
+  ;; principal -sirve tal cual como referencia para comprobar si un
+  ;; ramal sale perpendicular.
   (setq crossDir (angle p1 p2))
 
   (setq nBranches (if (= tipoUnion "Cruz") 2 1))
@@ -516,5 +688,5 @@
   (princ)
 )
 
-(princ "\nCONDUCTOS cargado. Escribe 'CONDUCTO' para trazar un conducto circular o rectangular, o 'CONDUCTORAMAL' para insertar una union en T o en cruz.")
+(princ "\nCONDUCTOS cargado. Escribe 'CONDUCTO' para trazar un conducto circular o rectangular con codos como bloques, o 'CONDUCTORAMAL' para insertar una union en T o en cruz.")
 (princ)
