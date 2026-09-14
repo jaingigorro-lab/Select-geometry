@@ -519,7 +519,7 @@
 
 (defun c:CONDUCTO
   ( / tipo diametro ancho dim half beforeEnt plEnt rawPts pts n
-      i a v c defl nearest warnCount tlen oldOrtho
+      i a v c defl nearest warnCount tlen oldOrtho badVertices bv
       boundaries p1 p2 crossSign rotAng blkName inserted nElbows
       segCL off1 off2 nSegs axisData bulgeVal axisEnt axisObj)
 
@@ -583,6 +583,52 @@
   (setq nElbows 0)
   (setq nSegs 0)
 
+  ;; Validacion de angulos ANTES de crear nada: un codo con un angulo
+  ;; que no sea uno de los normalizados no llega a dibujarse -se
+  ;; rechaza el recorrido ENTERO (no se crea ni un tramo ni un codo) y
+  ;; hay que corregirlo y volver a ejecutar CONDUCTO-, en vez de
+  ;; crearlo igual con solo un aviso.
+  (setq badVertices '())
+  (if (>= n 3)
+    (progn
+      (setq i 1)
+      (while (< i (1- n))
+        (setq a (nth (1- i) pts))
+        (setq v (nth i pts))
+        (setq c (nth (1+ i) pts))
+        (setq defl (deflection-deg a v c))
+        (if (= tipo "Circular")
+          (progn
+            (setq nearest (nearest-standard-angle defl *conducto-standard-angles*))
+            (if (> (cadr nearest) *conducto-angle-warn-tol-deg*)
+              (setq badVertices (append badVertices (list (list (1+ i) defl))))
+            )
+          )
+          (if (> (abs (- defl 90.0)) *conducto-angle-warn-tol-deg*)
+            (setq badVertices (append badVertices (list (list (1+ i) defl))))
+          )
+        )
+        (setq i (1+ i))
+      )
+    )
+  )
+  (if badVertices
+    (progn
+      (princ (strcat "\n[CONDUCTO] Recorrido RECHAZADO: hay codo(s) sin angulo normalizado"
+                     (if (= tipo "Circular")
+                       (strcat " (validos: " (implode-list (mapcar '(lambda (x) (rtos x 2 1)) *conducto-standard-angles*) ", ") ")")
+                       " (solo se admite 90 en rectangular)"
+                     )
+                     ":"))
+      (foreach bv badVertices
+        (princ (strcat "\n  - vertice " (itoa (car bv)) ": " (rtos (cadr bv) 2 1) " grados"))
+      )
+      (princ "\n[CONDUCTO] No se ha creado ningun tramo ni codo. Corrige el recorrido (usa ORTHO/polar) y vuelve a ejecutar CONDUCTO.")
+      (princ)
+      (exit)
+    )
+  )
+
   ;; "boundaries" es la lista de puntos reales donde empieza/termina
   ;; cada TRAMO RECTO de pared: el inicio y el fin del recorrido, y los
   ;; dos puntos de conexion (tangencia en circular, union a inglete en
@@ -604,36 +650,22 @@
     (setq c (nth (1+ i) pts))
     (setq defl (deflection-deg a v c))
 
-    (if (= tipo "Circular")
-      (progn
-        (setq nearest (nearest-standard-angle defl *conducto-standard-angles*))
-        (if (> (cadr nearest) *conducto-angle-warn-tol-deg*)
-          (progn
-            (princ (strcat "\n[CONDUCTO] Aviso: el codo en el vertice " (itoa (1+ i))
-                           " tiene " (rtos defl 2 1) " grados, no es un angulo normalizado ("
-                           (implode-list (mapcar '(lambda (x) (rtos x 2 1)) *conducto-standard-angles*) ", ")
-                           "). Ajusta el recorrido con ORTHO/polar si hace falta."))
-            (setq warnCount (1+ warnCount))
-          )
-        )
-        (setq tlen (* (* *conducto-radius-factor* dim) (tan (/ (* defl (/ pi 180.0)) 2.0))))
-      )
-      (progn
-        (if (> (abs (- defl 90.0)) *conducto-angle-warn-tol-deg*)
-          (progn
-            (princ (strcat "\n[CONDUCTO] Aviso: el codo en el vertice " (itoa (1+ i))
-                           " tiene " (rtos defl 2 1) " grados; el codo a escuadra esta pensado para 90. "
-                           "Ajusta el recorrido con ORTHO/polar si hace falta."))
-            (setq warnCount (1+ warnCount))
-          )
-        )
-        (setq tlen (* *conducto-rect-elbow-leg-factor* dim))
+    ;; El angulo ya se valido como normalizado antes de llegar aqui
+    ;; (si no lo fuera, el recorrido entero se habria rechazado mas
+    ;; arriba); aqui solo hace falta la longitud de conexion del codo.
+    (setq tlen
+      (if (= tipo "Circular")
+        (* (* *conducto-radius-factor* dim) (tan (/ (* defl (/ pi 180.0)) 2.0)))
+        (* *conducto-rect-elbow-leg-factor* dim)
       )
     )
 
     (if (or (> tlen (distance a v)) (> tlen (distance v c)))
-      (princ (strcat "\n[CONDUCTO] Aviso: el tramo junto al vertice " (itoa (1+ i))
-                     " puede ser demasiado corto para el codo (necesita " (rtos tlen 2 1) " a cada lado)."))
+      (progn
+        (princ (strcat "\n[CONDUCTO] Aviso: el tramo junto al vertice " (itoa (1+ i))
+                       " puede ser demasiado corto para el codo (necesita " (rtos tlen 2 1) " a cada lado)."))
+        (setq warnCount (1+ warnCount))
+      )
     )
 
     ;; Puntos de conexion del codo con los tramos rectos vecinos.
@@ -719,7 +751,7 @@
 
   (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado: " (itoa nSegs) " tramo(s) recto(s) y "
                  (itoa nElbows) " codo(s) normalizado(s) insertado(s) como bloque"
-                 (if (> warnCount 0) (strcat ", " (itoa warnCount) " con aviso de angulo") "")
+                 (if (> warnCount 0) (strcat ", " (itoa warnCount) " con aviso de tramo corto") "")
                  ". Eje central conservado."))
   (princ)
 )
