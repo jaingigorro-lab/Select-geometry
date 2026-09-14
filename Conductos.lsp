@@ -304,15 +304,54 @@
   (strcat "CODO_" (if (= tipo "Circular") "CIRC" "RECT") "_D" (num-tag dim) "_A" (num-tag ang))
 )
 
+;; True si el bloque "name" existe Y tiene contenido real (al menos
+;; una entidad dentro). No basta con que el NOMBRE ya exista en la
+;; tabla de bloques: un intento anterior fallido (a media creacion)
+;; puede haber dejado una definicion vacia con ese mismo nombre, que
+;; se reutilizaria para siempre -insertando un codo invisible, sin
+;; geometria- si solo se comprobara con tblsearch.
+(defun block-has-content (name / ent obj cnt)
+  (setq ent (tblobjname "BLOCK" name))
+  (if (not ent)
+    nil
+    (progn
+      (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
+      (if (vl-catch-all-error-p obj)
+        nil
+        (progn
+          (setq cnt (vl-catch-all-apply 'vla-get-Count (list obj)))
+          (and (not (vl-catch-all-error-p cnt)) (> cnt 0))
+        )
+      )
+    )
+  )
+)
+
+;; Borra la definicion de bloque "name" si existe -para no dejar una
+;; definicion rota/vacia de un intento fallido envenenando para
+;; siempre los intentos siguientes con el mismo nombre-.
+(defun delete-block-def (name / ent obj)
+  (setq ent (tblobjname "BLOCK" name))
+  (if ent
+    (progn
+      (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
+      (if (not (vl-catch-all-error-p obj))
+        (vl-catch-all-apply 'vla-Delete (list obj))
+      )
+    )
+  )
+)
+
 ;; Codo CIRCULAR: dos arcos concentricos (pared exterior/interior) de
 ;; radio 1.5xD +/- media dimension, mas 3 atributos (DIAM, ANG, TIPO).
 ;; Devuelve el nombre del bloque (creandolo si hace falta), o nil si
 ;; algo ha fallado.
 (defun ensure-circular-elbow-block (dim ang / name doc blocks blk R Ttan angRad center outerR innerR attH ok)
   (setq name (elbow-block-name "Circular" dim ang))
-  (if (tblsearch "BLOCK" name)
+  (if (block-has-content name)
     name
     (progn
+      (delete-block-def name)
       (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
       (setq blocks (vla-get-Blocks doc))
       (setq blk (vl-catch-all-apply 'vla-Add (list blocks (list 0.0 0.0 0.0) name)))
@@ -363,9 +402,10 @@
 (defun ensure-rect-elbow-block (dim ang / name doc blocks blk angRad Tr half cosA sinA v s
                                  nearPt vOffset cornerPt farPt attH ok)
   (setq name (elbow-block-name "Rectangular" dim ang))
-  (if (tblsearch "BLOCK" name)
+  (if (block-has-content name)
     name
     (progn
+      (delete-block-def name)
       (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
       (setq blocks (vla-get-Blocks doc))
       (setq blk (vl-catch-all-apply 'vla-Add (list blocks (list 0.0 0.0 0.0) name)))
