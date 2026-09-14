@@ -23,8 +23,9 @@
 ;;      codos los pone el comando.
 ;;   4. El comando genera el doble contorno del conducto (dos lineas
 ;;      paralelas separadas la dimension indicada) con los codos
-;;      normalizados ya insertados en cada vertice, y borra la
-;;      polilinea de eje usada como base.
+;;      normalizados ya insertados en cada vertice, y conserva la
+;;      polilinea de eje central usada como base (con linea de
+;;      trazo-punto "CENTER" si esta disponible en el dibujo).
 ;; ==========================================================
 
 ;; Radio de los codos circulares = este factor x el diametro (1.5xD,
@@ -264,17 +265,21 @@
 
   ;; Doble contorno del conducto: dos desfases simetricos de la
   ;; polilinea de eje (ya con los codos, circulares o a escuadra, ya
-  ;; resueltos), uno a cada lado.
+  ;; resueltos), uno a cada lado. La linea de eje NO se borra: se deja
+  ;; en el dibujo como referencia del recorrido, marcada con la linea
+  ;; de trazo-punto "CENTER" tipica de un eje si esta cargada (o
+  ;; disponible en acad.lin) -si no, se queda con el tipo de linea
+  ;; continuo por defecto, sin que eso afecte al resto del comando.
   (setq offsets (append (offset-curve plEnt half) (offset-curve plEnt (- half))))
 
+  (vl-catch-all-apply 'command (list "_.-LINETYPE" "_Load" "CENTER" "acad.lin" ""))
+  (vl-catch-all-apply 'vla-put-Linetype (list (vlax-ename->vla-object plEnt) "CENTER"))
+
   (if offsets
-    (progn
-      (entdel plEnt)
-      (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado con " (itoa (max 0 (- n 2))) " codo(s)"
-                     (if (> warnCount 0) (strcat ", " (itoa warnCount) " con aviso de angulo") "")
-                     "."))
-    )
-    (princ "\n[CONDUCTO] No se ha podido generar el doble contorno del conducto; se deja la linea de eje sin borrar para revisar.")
+    (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado con " (itoa (max 0 (- n 2))) " codo(s)"
+                   (if (> warnCount 0) (strcat ", " (itoa warnCount) " con aviso de angulo") "")
+                   ". Eje central conservado."))
+    (princ "\n[CONDUCTO] No se ha podido generar el doble contorno del conducto; se deja la linea de eje para revisar.")
   )
   (princ)
 )
