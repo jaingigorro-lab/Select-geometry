@@ -234,9 +234,11 @@
       textInfos txtEnt txtObj txtStr txtHeight txtPt
       candidates cand ti ti2 ch te d0 d1
       assignedText assignedChain assignment bestChain
-      chainUCS p usedLines usedTexts arrowInfos ai arrowPt
-      mlEnt mlObj doneCount
-      solidEnt solidCandidates scand solidClosest usedArrowInfos usedSolidEnts dd)
+      leaderPlans lp origChain finalChain rawArrowPt
+      solidCandidates scand solidEnt solPt dd
+      usedTextsForArrow usedSolidEnts arrowMatch matched solidRef
+      chainUCS p usedLines usedTexts
+      mlEnt mlObj doneCount)
 
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq modelSpace (vla-get-ModelSpace doc))
@@ -356,32 +358,93 @@
     )
   )
 
+  ;; Orientar cada cadena ya asignada a un texto: el extremo que se
+  ;; conecta con el texto (el mas cercano a el) queda al final -asi el
+  ;; ultimo punto que se envia a MLEADER es el enganche, y el primero,
+  ;; el punto en bruto de la punta de flecha, tal como salio de la
+  ;; linea reconstruida.
+  (setq leaderPlans '())
+  (foreach ti textInfos
+    (setq te (car ti))
+    (setq bestChain (cdr (assoc te assignment)))
+    (if bestChain
+      (progn
+        (setq txtPt (nth 3 ti))
+        (if (>= (distance (last bestChain) txtPt) (distance (car bestChain) txtPt))
+          (setq bestChain (reverse bestChain))
+        )
+        (setq leaderPlans (cons (list te bestChain (car bestChain)) leaderPlans))
+      )
+    )
+  )
+
+  ;; --- Localizar, tambien con emparejamiento GLOBAL, la flecha suelta
+  ;; (SOLID/INSERT) de referencia de cada directriz ya emparejada -si la
+  ;; hay-. El vertice en bruto de la linea puede quedarse corto o
+  ;; pasarse del verdadero punto de la flecha original (asi que la
+  ;; directriz reconstruida parecia "no usar" esa flecha), asi que
+  ;; cuando se encuentra una flecha de referencia dentro de tolerancia,
+  ;; su posicion EXACTA sustituye a ese vertice en bruto como punta real
+  ;; de la nueva directriz, y esa flecha queda reservada para borrarla
+  ;; al crearla -de nuevo por distancia global, para que una directriz
+  ;; no le pueda robar a la vecina la suya y dejarla sin borrar-.
+  (setq solidCandidates '())
+  (foreach lp leaderPlans
+    (setq te (car lp))
+    (setq rawArrowPt (caddr lp))
+    (setq txtHeight (caddr (assoc te textInfos)))
+    (foreach solidEnt solidList
+      (setq solPt (trans (cdr (assoc 10 (entget solidEnt))) solidEnt 0))
+      (setq dd (distance rawArrowPt solPt))
+      (if (< dd (* *recdir-arrow-cleanup-factor* txtHeight))
+        (setq solidCandidates (cons (list dd te solidEnt solPt) solidCandidates))
+      )
+    )
+  )
+  (setq solidCandidates (vl-sort solidCandidates '(lambda (a b) (< (car a) (car b)))))
+
+  (setq usedTextsForArrow '())
+  (setq usedSolidEnts '())
+  (setq arrowMatch '())
+  (foreach scand solidCandidates
+    (setq te (cadr scand))
+    (setq solidEnt (caddr scand))
+    (setq solPt (nth 3 scand))
+    (if (and (not (member te usedTextsForArrow)) (not (member solidEnt usedSolidEnts)))
+      (progn
+        (setq usedTextsForArrow (cons te usedTextsForArrow))
+        (setq usedSolidEnts (cons solidEnt usedSolidEnts))
+        (setq arrowMatch (cons (list te solidEnt solPt) arrowMatch))
+      )
+    )
+  )
+
   (setq usedLines '())
   (setq usedTexts '())
-  (setq arrowInfos '())
   (setq doneCount 0)
 
   (foreach ti textInfos
     (setq txtEnt (car ti))
     (setq txtStr (cadr ti))
     (setq txtHeight (caddr ti))
-    (setq txtPt (nth 3 ti))
-    (setq bestChain (cdr (assoc txtEnt assignment)))
+    (setq lp (assoc txtEnt leaderPlans))
 
-    (if bestChain
+    (if lp
       (progn
-        ;; Orientar la cadena: el extremo que se conecta con el texto (el
-        ;; mas cercano a el) queda al final -asi el ultimo punto que se
-        ;; envia a MLEADER es el enganche, y el primero, la punta de
-        ;; flecha, exactamente como estaban en la geometria original.
-        (if (>= (distance (last bestChain) txtPt) (distance (car bestChain) txtPt))
-          (setq bestChain (reverse bestChain))
+        (setq origChain (cadr lp))
+        (setq finalChain origChain)
+        (setq matched (assoc txtEnt arrowMatch))
+        (setq solidRef nil)
+        (if matched
+          (progn
+            (setq solidRef (cadr matched))
+            (setq finalChain (cons (caddr matched) (cdr origChain)))
+          )
         )
-        (setq arrowPt (car bestChain))
 
         ;; Los puntos que se pasan a (command) se interpretan en el SCP
         ;; activo, no en el mundo: hay que convertirlos.
-        (setq chainUCS (mapcar '(lambda (p) (trans p 0 1)) bestChain))
+        (setq chainUCS (mapcar '(lambda (p) (trans p 0 1)) finalChain))
 
         ;; --- crear el MULTILEADER: solo se dan los puntos; el texto NO
         ;; se escribe durante la creacion (el editor en linea se cierra
@@ -420,45 +483,20 @@
             (vl-catch-all-apply 'vla-put-DoglegLength (list mlObj 0.0))
             (vl-catch-all-apply 'vla-put-LandingGap (list mlObj 0.0))
 
-            (setq usedLines (append usedLines (entities-for-chain bestChain lineList *recdir-chain-tolerance*)))
+            ;; entities-for-chain compara contra las coordenadas REALES
+            ;; de las lineas originales, asi que aqui se usa la cadena
+            ;; SIN sustituir (origChain), no finalChain -si se sustituyo
+            ;; la punta por la flecha de referencia, ese ultimo tramo ya
+            ;; no coincidiria exactamente con ninguna linea real.
+            (setq usedLines (append usedLines (entities-for-chain origChain lineList *recdir-chain-tolerance*)))
             (setq usedTexts (cons txtEnt usedTexts))
-            (setq arrowInfos (cons (list arrowPt (* *recdir-arrow-cleanup-factor* txtHeight)) arrowInfos))
+            (if solidRef (entdel solidRef))
             (setq doneCount (1+ doneCount))
           )
           (princ (strcat "\n[RECDIR] Aviso: no se pudo crear el MULTILEADER para el texto \"" txtStr "\"."))
         )
       )
       (princ (strcat "\n[RECDIR] Aviso: no se ha encontrado ninguna cadena de lineas para el texto \"" txtStr "\"."))
-    )
-  )
-
-  ;; --- Limpieza de puntas de flecha sueltas (SOLID/INSERT), tambien por
-  ;; emparejamiento GLOBAL en vez de "la primera libre que pille cada
-  ;; directriz segun se va creando" -mismo motivo que arriba: con varias
-  ;; flechas juntas, una directriz podia borrar la flecha de la vecina y
-  ;; dejar la suya propia sin borrar. ---
-  (setq solidCandidates '())
-  (foreach ai arrowInfos
-    (foreach solidEnt solidList
-      (setq dd (distance (car ai) (trans (cdr (assoc 10 (entget solidEnt))) solidEnt 0)))
-      (if (< dd (cadr ai))
-        (setq solidCandidates (cons (list dd ai solidEnt) solidCandidates))
-      )
-    )
-  )
-  (setq solidCandidates (vl-sort solidCandidates '(lambda (a b) (< (car a) (car b)))))
-
-  (setq usedArrowInfos '())
-  (setq usedSolidEnts '())
-  (foreach scand solidCandidates
-    (setq ai (cadr scand))
-    (setq solidClosest (caddr scand))
-    (if (and (not (member ai usedArrowInfos)) (not (member solidClosest usedSolidEnts)))
-      (progn
-        (entdel solidClosest)
-        (setq usedArrowInfos (cons ai usedArrowInfos))
-        (setq usedSolidEnts (cons solidClosest usedSolidEnts))
-      )
     )
   )
 
