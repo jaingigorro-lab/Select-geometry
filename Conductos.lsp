@@ -176,32 +176,43 @@
 )
 
 ;; Se asegura de que el tipo de linea "CENTER" este cargado en el
-;; dibujo, cargandolo de acad.lin si hace falta. -LINETYPE Load puede
-;; abrir un cuadro de dialogo de seleccion de archivo si FILEDIA=1, asi
-;; que se pone FILEDIA a 0 mientras dura la carga (y se restaura
-;; despues) para que el comando lea "acad.lin" del propio macro en vez
-;; de quedarse esperando esa ventana. Devuelve T si al final esta
-;; disponible (ya lo estuviera, o se haya podido cargar).
-(defun ensure-center-linetype ( / oldFiledia)
+;; dibujo, cargandolo de acad.lin si hace falta -con el metodo
+;; AcadLineTypes.Load via ActiveX, no con el comando -LINETYPE, para no
+;; depender en absoluto de la linea de comandos (ni de un posible
+;; cuadro de dialogo de seleccion de archivo). Devuelve T si al final
+;; esta disponible (ya lo estuviera, o se haya podido cargar).
+(defun ensure-center-linetype ( / doc lts)
   (if (not (tblsearch "LTYPE" "CENTER"))
     (progn
-      (setq oldFiledia (getvar "FILEDIA"))
-      (setvar "FILEDIA" 0)
-      (vl-catch-all-apply 'command (list "_.-LINETYPE" "_Load" "CENTER" "acad.lin" ""))
-      (setvar "FILEDIA" oldFiledia)
+      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+      (setq lts (vla-get-Linetypes doc))
+      (vl-catch-all-apply 'vla-Load (list lts "CENTER" "acad.lin"))
     )
   )
   (tblsearch "LTYPE" "CENTER")
 )
 
 ;; Marca una entidad como "linea de eje": gris (color ACI 8) y linea de
-;; trazo-punto "CENTER" si se ha podido cargar.
-(defun mark-as-axis (ent / obj)
+;; trazo-punto "CENTER" si se ha podido cargar. Informa por pantalla de
+;; si alguno de los dos ajustes no ha surtido efecto, para no depender
+;; de adivinar por que "no se ve gris" si vuelve a fallar.
+(defun mark-as-axis (ent / obj ltRes colRes)
   (setq obj (vlax-ename->vla-object ent))
   (if (ensure-center-linetype)
-    (vl-catch-all-apply 'vla-put-Linetype (list obj "CENTER"))
+    (progn
+      (setq ltRes (vl-catch-all-apply 'vla-put-Linetype (list obj "CENTER")))
+      (if (vl-catch-all-error-p ltRes)
+        (princ (strcat "\n[CONDUCTOS] Aviso: no se ha podido poner la linea CENTER al eje ("
+                       (vl-catch-all-error-message ltRes) ")."))
+      )
+    )
+    (princ "\n[CONDUCTOS] Aviso: no se ha podido cargar el tipo de linea CENTER; el eje se queda en linea continua.")
   )
-  (vl-catch-all-apply 'vla-put-color (list obj 8))
+  (setq colRes (vl-catch-all-apply 'vla-put-Color (list obj 8)))
+  (if (vl-catch-all-error-p colRes)
+    (princ (strcat "\n[CONDUCTOS] Aviso: no se ha podido poner el eje en gris ("
+                   (vl-catch-all-error-message colRes) ")."))
+  )
 )
 
 ;; Punto mas cercano a pt sobre la curva ent (LINE, LWPOLYLINE...).
@@ -225,11 +236,24 @@
   (inters p1 (polar p1 dir1 1.0) p2 (polar p2 dir2 1.0) nil)
 )
 
+;; True si la LWPOLYLINE ent tiene al menos un vertice con bulge
+;; (arco) distinto de cero -para comprobar que un FILLET de polilinea
+;; realmente ha redondeado algo, en vez de dar por hecho que ha
+;; funcionado solo porque el comando no ha dado ningun error.
+(defun has-bulge (ent / edata found pair)
+  (setq edata (entget ent))
+  (setq found nil)
+  (foreach pair edata
+    (if (and (= (car pair) 42) (/= (cdr pair) 0.0)) (setq found T))
+  )
+  found
+)
+
 ;; --- CONDUCTO: trazado de un recorrido con codos automaticos ---
 
 (defun c:CONDUCTO
   ( / tipo diametro ancho beforeEnt plEnt rawPts pts n radius half
-      i a v c defl nearest warnCount tanlen offsets oldOrtho)
+      i a v c defl nearest warnCount tanlen offsets oldOrtho oldTrimmode)
 
   (initget "Circular Rectangular")
   (setq tipo (getkword "\n[CONDUCTO] Tipo de conducto [Circular/Rectangular] <Circular>: "))
@@ -328,8 +352,18 @@
           )
           ;; Fileter TODOS los vertices interiores a la vez con el radio
           ;; estandar (1.5 x diametro): quedan como arcos tangentes, el
-          ;; codo circular normalizado.
+          ;; codo circular normalizado. La opcion Polilinea de FILLET
+          ;; depende de TRIMMODE para recortar y unir bien los tramos
+          ;; en el arco -si el dibujo lo tuviera a 0 (sin recorte), el
+          ;; redondeo puede no llegar a hacerse-, asi que se fuerza a 1
+          ;; mientras dura el fileteado y se restaura despues.
+          (setq oldTrimmode (getvar "TRIMMODE"))
+          (setvar "TRIMMODE" 1)
           (command "_.FILLET" "_R" radius "_P" plEnt)
+          (setvar "TRIMMODE" oldTrimmode)
+          (if (not (has-bulge plEnt))
+            (princ "\n[CONDUCTO] Aviso: FILLET no parece haber redondeado ningun vertice del eje -el conducto saldra con esquinas rectas en vez de con codos circulares.")
+          )
         )
       )
     )
