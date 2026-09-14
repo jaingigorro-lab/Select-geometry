@@ -187,6 +187,21 @@
   (entmakex data)
 )
 
+;; Como make-polyline, pero a partir de una lista de (punto . bulge)
+;; -el bulge de un vertice define el arco (si no es 0) del tramo que
+;; va de ESE vertice al siguiente-. Devuelve su ename.
+(defun make-polyline-b (ptBulges / data pb)
+  (setq data (list '(0 . "LWPOLYLINE") '(100 . "AcDbEntity") '(100 . "AcDbPolyline")
+                    (cons 90 (length ptBulges)) '(70 . 0)))
+  (foreach pb ptBulges
+    (setq data (append data (list (cons 10 (list (car (car pb)) (cadr (car pb)))))))
+    (if (/= (cdr pb) 0.0)
+      (setq data (append data (list (cons 42 (cdr pb)))))
+    )
+  )
+  (entmakex data)
+)
+
 ;; Desfasa (OFFSET) una curva "dist" unidades (con signo: + a un lado,
 ;; - al otro). Devuelve la lista de vla-objects resultantes, o nil si
 ;; ha fallado.
@@ -221,9 +236,14 @@
 )
 
 ;; Marca una entidad como "linea de eje": gris (color ACI 8) y linea de
-;; trazo-punto "CENTER" si se ha podido cargar. Informa por pantalla de
-;; si alguno de los dos ajustes no ha surtido efecto.
-(defun mark-as-axis (ent / obj ltRes colRes)
+;; trazo-punto "CENTER" si se ha podido cargar, con una escala de linea
+;; propia (parametro opcional "scale") -sin esto, si LTSCALE/CELTSCALE
+;; del dibujo son grandes respecto al tamano real del conducto, el
+;; patron de trazo-punto puede no llegar a verse nunca (un solo trazo
+;; largo sin huecos visibles), aunque el tipo de linea este bien
+;; puesto-. Informa por pantalla de si algun ajuste no ha surtido
+;; efecto.
+(defun mark-as-axis (ent scale / obj ltRes colRes lsRes)
   (setq obj (vlax-ename->vla-object ent))
   (if (ensure-center-linetype)
     (progn
@@ -239,6 +259,15 @@
   (if (vl-catch-all-error-p colRes)
     (princ (strcat "\n[CONDUCTOS] Aviso: no se ha podido poner el eje en gris ("
                    (vl-catch-all-error-message colRes) ")."))
+  )
+  (if (and scale (> scale 0.0))
+    (progn
+      (setq lsRes (vl-catch-all-apply 'vla-put-LinetypeScale (list obj scale)))
+      (if (vl-catch-all-error-p lsRes)
+        (princ (strcat "\n[CONDUCTOS] Aviso: no se ha podido ajustar la escala de linea del eje ("
+                       (vl-catch-all-error-message lsRes) ")."))
+      )
+    )
   )
 )
 
@@ -413,7 +442,7 @@
   ( / tipo diametro ancho dim half beforeEnt plEnt rawPts pts n
       i a v c defl nearest warnCount tlen oldOrtho
       boundaries p1 p2 crossSign rotAng blkName inserted nElbows
-      segCL off1 off2 nSegs)
+      segCL off1 off2 nSegs axisData bulgeVal axisEnt axisObj)
 
   (initget "Circular Rectangular")
   (setq tipo (getkword "\n[CONDUCTO] Tipo de conducto [Circular/Rectangular] <Circular>: "))
@@ -468,14 +497,7 @@
   )
 
   (setq pts (simplify-points rawPts 1e-6))
-
-  ;; La propia polilinea trazada (sin redondear, con sus vertices tal
-  ;; cual) se conserva como eje central de referencia -las paredes del
-  ;; conducto se generan aparte, tramo a tramo, y los codos como
-  ;; bloques, no a partir de esta.
   (entdel plEnt)
-  (setq plEnt (make-polyline pts))
-  (mark-as-axis plEnt)
 
   (setq n (length pts))
   (setq warnCount 0)
@@ -487,6 +509,14 @@
   ;; dos puntos de conexion (tangencia en circular, union a inglete en
   ;; rectangular) de cada codo interior -en vez del vertice en bruto-.
   (setq boundaries (list (car pts)))
+
+  ;; "axisData" es la lista (punto . bulge) del EJE de referencia:
+  ;; a diferencia de "boundaries" (que solo marca donde empiezan/
+  ;; terminan los tramos rectos), este SI seguira la forma real del
+  ;; conducto en cada codo -un arco (bulge) en circular, o pasando por
+  ;; el vertice real en rectangular- en vez de quedarse con las
+  ;; esquinas en bruto del recorrido trazado.
+  (setq axisData (list (cons (car pts) 0.0)))
 
   (setq i 1)
   (while (< i (1- n))
@@ -537,6 +567,20 @@
     ;; espejado si el giro es hacia la derecha.
     (setq crossSign (cross-2d (polar (list 0.0 0.0) (angle a v) 1.0) (polar (list 0.0 0.0) (angle v c) 1.0)))
     (setq rotAng (angle a v))
+
+    ;; El eje sigue la MISMA curva que el codo: en circular, un arco de
+    ;; bulge = tan(angulo/4) (positivo si gira a la izquierda, negativo
+    ;; si a la derecha -el mismo signo que crossSign-); en rectangular
+    ;; no hay arco, pero el eje pasa por el vertice real (no por una
+    ;; cuerda recta p1-p2, que cortaria la esquina).
+    (if (= tipo "Circular")
+      (progn
+        (setq bulgeVal (tan (/ (* defl (/ pi 180.0)) 4.0)))
+        (if (< crossSign 0.0) (setq bulgeVal (- bulgeVal)))
+        (setq axisData (append axisData (list (cons p1 bulgeVal) (cons p2 0.0))))
+      )
+      (setq axisData (append axisData (list (cons p1 0.0) (cons v 0.0) (cons p2 0.0))))
+    )
     (setq blkName
       (if (= tipo "Circular")
         (ensure-circular-elbow-block dim defl)
@@ -556,6 +600,16 @@
   )
 
   (setq boundaries (append boundaries (list (last pts))))
+  (setq axisData (append axisData (list (cons (last pts) 0.0))))
+
+  ;; El eje de referencia: sigue el recorrido real, con arco en cada
+  ;; codo circular (bulge) o pasando por el vertice en rectangular -a
+  ;; diferencia de "boundaries", que es solo para generar las paredes-.
+  (setq axisEnt (make-polyline-b axisData))
+  (mark-as-axis axisEnt (/ dim 20.0))
+  (setq axisObj (vlax-ename->vla-object axisEnt))
+  (princ (strcat "\n[CONDUCTO] Eje: color=" (itoa (vla-get-Color axisObj))
+                 " tipolinea=" (vla-get-Linetype axisObj)))
 
   ;; "boundaries" alterna HUECO-DE-TRAMO-RECTO, HUECO-DE-CODO, tramo,
   ;; codo, ..., tramo: (inicio, p1-codo1, p2-codo1, p1-codo2, p2-codo2,
@@ -581,6 +635,8 @@
     )
     (setq i (1+ i))
   )
+
+  (command "_.REGEN")
 
   (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado: " (itoa nSegs) " tramo(s) recto(s) y "
                  (itoa nElbows) " codo(s) normalizado(s) insertado(s) como bloque"
@@ -683,10 +739,11 @@
       )
     )
 
-    (mark-as-axis branchCL)
+    (mark-as-axis branchCL (/ branchDim 20.0))
     (setq k (1+ k))
   )
 
+  (command "_.REGEN")
   (princ "\n[CONDUCTORAMAL] Union creada. El conducto principal no se ha modificado.")
   (princ)
 )
