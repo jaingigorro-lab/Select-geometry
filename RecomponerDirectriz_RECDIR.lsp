@@ -57,6 +57,22 @@
   (< (distance p1 p2) tol)
 )
 
+;; Ajusta una propiedad ActiveX de "obj" con vla-put-<prop>, sin dejar
+;; que un fallo silencioso pase desapercibido: si vl-catch-all-apply
+;; atrapa un error (propiedad inexistente en esta version de AutoCAD,
+;; numero de argumentos equivocado, tipo de dato no admitido...), se
+;; avisa por pantalla con el motivo -asi, si algo no surte efecto, se ve
+;; en la linea de comandos por que, en vez de fallar en silencio como
+;; con un vl-catch-all-apply suelto.
+(defun safe-put (fn obj val label / result)
+  (setq result (vl-catch-all-apply fn (list obj val)))
+  (if (vl-catch-all-error-p result)
+    (princ (strcat "\n[RECDIR] Aviso: no se ha podido ajustar " label
+                   " (" (vl-catch-all-error-message result) ")."))
+  )
+  result
+)
+
 ;; Concatena una lista de cadenas de texto con un separador.
 (defun implode-list (lst sep / result)
   (setq result "")
@@ -466,7 +482,7 @@
             ;; entidad nativa con linea, flecha y texto asociados entre
             ;; si-. El texto suelto original ya no hace falta: se marca
             ;; para borrarlo mas abajo, junto con las lineas consumidas.
-            (vl-catch-all-apply 'vla-put-TextString (list mlObj txtStr))
+            (safe-put 'vla-put-TextString mlObj txtStr "el texto")
 
             ;; Sin esto, el texto aparece donde el ESTILO de directriz
             ;; decida colocarlo por defecto (tramo horizontal/"dogleg" +
@@ -478,10 +494,19 @@
             ;; quede pegado justo al ultimo vertice de la cadena -el que
             ;; ya se eligio como el mas cercano al texto original-, y se
             ;; iguala su altura a la del texto original.
-            (vl-catch-all-apply 'vla-put-TextHeight (list mlObj txtHeight))
-            (vl-catch-all-apply 'vla-put-EnableDogleg (list mlObj :vlax-false))
-            (vl-catch-all-apply 'vla-put-DoglegLength (list mlObj 0.0))
-            (vl-catch-all-apply 'vla-put-LandingGap (list mlObj 0.0))
+            (safe-put 'vla-put-TextHeight mlObj txtHeight "la altura de texto")
+            (safe-put 'vla-put-EnableDogleg mlObj :vlax-false "el dogleg")
+            (safe-put 'vla-put-DoglegLength mlObj 0.0 "la longitud del dogleg")
+            (safe-put 'vla-put-LandingGap mlObj 0.0 "el hueco de enganche")
+
+            ;; Diagnostico: distancia entre donde estaba el texto
+            ;; original y el punto de enganche que se le dio a MLEADER.
+            ;; Si sale grande, el problema esta en el punto que se le
+            ;; paso al comando (la cadena reconstruida); si sale
+            ;; pequena y el texto aun asi aparece lejos, el problema esta
+            ;; en como AutoCAD coloca el texto a partir de ese punto.
+            (princ (strcat "\n[RECDIR] Debug \"" txtStr "\": texto original-enganche = "
+                           (rtos (distance (nth 3 ti) (last finalChain)) 2 2)))
 
             ;; entities-for-chain compara contra las coordenadas REALES
             ;; de las lineas originales, asi que aqui se usa la cadena
