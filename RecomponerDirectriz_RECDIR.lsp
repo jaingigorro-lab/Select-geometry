@@ -405,6 +405,21 @@
             ;; para borrarlo mas abajo, junto con las lineas consumidas.
             (vl-catch-all-apply 'vla-put-TextString (list mlObj txtStr))
 
+            ;; Sin esto, el texto aparece donde el ESTILO de directriz
+            ;; decida colocarlo por defecto (tramo horizontal/"dogleg" +
+            ;; hueco de enganche), que puede quedar muy lejos si la
+            ;; escala del estilo no encaja con la de este dibujo -es lo
+            ;; que hacia que el texto apareciera "desplazado", suelto,
+            ;; sin conectar con la linea recompuesta-. Se anula ese
+            ;; tramo automatico (dogleg y hueco a 0) para que el texto
+            ;; quede pegado justo al ultimo vertice de la cadena -el que
+            ;; ya se eligio como el mas cercano al texto original-, y se
+            ;; iguala su altura a la del texto original.
+            (vl-catch-all-apply 'vla-put-TextHeight (list mlObj txtHeight))
+            (vl-catch-all-apply 'vla-put-EnableDogleg (list mlObj :vlax-false))
+            (vl-catch-all-apply 'vla-put-DoglegLength (list mlObj 0.0))
+            (vl-catch-all-apply 'vla-put-LandingGap (list mlObj 0.0))
+
             (setq usedLines (append usedLines (entities-for-chain bestChain lineList *recdir-chain-tolerance*)))
             (setq usedTexts (cons txtEnt usedTexts))
             (setq arrowInfos (cons (list arrowPt (* *recdir-arrow-cleanup-factor* txtHeight)) arrowInfos))
