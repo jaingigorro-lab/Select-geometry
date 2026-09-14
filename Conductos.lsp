@@ -342,46 +342,67 @@
   )
 )
 
+;; Construye la definicion de bloque "name" a partir de una lista de
+;; entidades YA CREADAS en el espacio modelo (via entmake, en el
+;; sistema local propio del bloque, alrededor del origen), usando el
+;; comando -BLOCK (sin dialogo) -el camino mas clasico y probado en
+;; AutoLISP para crear un bloque a partir de geometria ya dibujada, en
+;; vez de construirlo entidad a entidad con metodos ActiveX (vla-Add,
+;; vla-AddArc...) que no se han podido verificar-. Limpia cualquier
+;; entidad que quede suelta despues (tanto si el bloque se creo bien
+;; como si DELOBJ dejaba copias sin borrar). Devuelve "name" si el
+;; bloque quedo creado, o nil si no.
+(defun build-block-from-entities (name ents / ss e)
+  (if (member nil ents)
+    (progn
+      (foreach e ents (if (and e (entget e)) (entdel e)))
+      nil
+    )
+    (progn
+      (setq ss (ssadd))
+      (foreach e ents (setq ss (ssadd e ss)))
+      (command "_.-BLOCK" name (list 0.0 0.0 0.0) ss "")
+      (foreach e ents (if (entget e) (entdel e)))
+      (if (tblsearch "BLOCK" name) name nil)
+    )
+  )
+)
+
 ;; Codo CIRCULAR: dos arcos concentricos (pared exterior/interior) de
 ;; radio 1.5xD +/- media dimension, mas 3 atributos (DIAM, ANG, TIPO).
 ;; Devuelve el nombre del bloque (creandolo si hace falta), o nil si
 ;; algo ha fallado.
-(defun ensure-circular-elbow-block (dim ang / name doc blocks blk R Ttan angRad center outerR innerR attH ok)
+(defun ensure-circular-elbow-block (dim ang / name R Ttan angRad center outerR innerR attH ents)
   (setq name (elbow-block-name "Circular" dim ang))
   (if (block-has-content name)
     name
     (progn
       (delete-block-def name)
-      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
-      (setq blocks (vla-get-Blocks doc))
-      (setq blk (vl-catch-all-apply 'vla-Add (list blocks (list 0.0 0.0 0.0) name)))
-      (setq ok (not (vl-catch-all-error-p blk)))
-      (if ok
-        (progn
-          (setq R (* *conducto-radius-factor* dim))
-          (setq angRad (* ang (/ pi 180.0)))
-          (setq Ttan (* R (tan (/ angRad 2.0))))
-          (setq center (list 0.0 R 0.0))
-          (setq outerR (+ R (/ dim 2.0)))
-          (setq innerR (- R (/ dim 2.0)))
-          (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddArc
-                (list blk center outerR (* 1.5 pi) (+ (* 1.5 pi) angRad))))
-            (setq ok nil)
-          )
-          (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddArc
-                (list blk center innerR (* 1.5 pi) (+ (* 1.5 pi) angRad))))
-            (setq ok nil)
-          )
-          (setq attH (max 1.0 (* dim 0.12)))
-          (vl-catch-all-apply 'vla-AddAttribute
-            (list blk attH 0 "Diametro" (list (+ Ttan (* dim 0.1)) (* dim -0.1) 0.0) "DIAM" (rtos dim 2 0)))
-          (vl-catch-all-apply 'vla-AddAttribute
-            (list blk attH 0 "Angulo" (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0) "ANG" (rtos ang 2 1)))
-          (vl-catch-all-apply 'vla-AddAttribute
-            (list blk attH 0 "Tipo" (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0) "TIPO" "CIRCULAR"))
+      (setq R (* *conducto-radius-factor* dim))
+      (setq angRad (* ang (/ pi 180.0)))
+      (setq Ttan (* R (tan (/ angRad 2.0))))
+      (setq center (list 0.0 R 0.0))
+      (setq outerR (+ R (/ dim 2.0)))
+      (setq innerR (- R (/ dim 2.0)))
+      (setq attH (max 1.0 (* dim 0.12)))
+      (setq ents
+        (list
+          (entmakex (list '(0 . "ARC") (cons 10 center) (cons 40 outerR)
+                          (cons 50 (* 1.5 pi)) (cons 51 (+ (* 1.5 pi) angRad))))
+          (entmakex (list '(0 . "ARC") (cons 10 center) (cons 40 innerR)
+                          (cons 50 (* 1.5 pi)) (cons 51 (+ (* 1.5 pi) angRad))))
+          (entmakex (list '(0 . "ATTDEF")
+                          (cons 10 (list (+ Ttan (* dim 0.1)) (* dim -0.1) 0.0))
+                          (cons 40 attH) (cons 1 (rtos dim 2 0)) (cons 3 "Diametro") (cons 2 "DIAM") '(70 . 0)))
+          (entmakex (list '(0 . "ATTDEF")
+                          (cons 10 (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0))
+                          (cons 40 attH) (cons 1 (rtos ang 2 1)) (cons 3 "Angulo") (cons 2 "ANG") '(70 . 0)))
+          (entmakex (list '(0 . "ATTDEF")
+                          (cons 10 (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0))
+                          (cons 40 attH) (cons 1 "CIRCULAR") (cons 3 "Tipo") (cons 2 "TIPO") '(70 . 0)))
         )
       )
-      (if ok
+      (if (build-block-from-entities name ents)
         name
         (progn
           (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear el bloque de codo \"" name "\"."))
@@ -396,57 +417,50 @@
 ;; *conducto-rect-elbow-leg-factor* x ancho) que se encuentran en un
 ;; vertice a inglete, con sus dos paredes -mismo calculo de esquina a
 ;; inglete que produce un OFFSET, pero resuelto aqui con interseccion
-;; de rectas porque la geometria vive dentro de la definicion del
-;; bloque, no en el espacio modelo-, mas 3 atributos (ANCHO, ANG,
-;; TIPO). Devuelve el nombre del bloque, o nil si algo ha fallado.
-(defun ensure-rect-elbow-block (dim ang / name doc blocks blk angRad Tr half cosA sinA v s
-                                 nearPt vOffset cornerPt farPt attH ok)
+;; de rectas porque la geometria vive en un sistema local propio,
+;; alrededor del origen, antes de convertirse en bloque-, mas 3
+;; atributos (ANCHO, ANG, TIPO). Devuelve el nombre del bloque, o nil
+;; si algo ha fallado.
+(defun ensure-rect-elbow-block (dim ang / name angRad Tr half cosA sinA v s
+                                 nearPt vOffset cornerPt farPt attH ents)
   (setq name (elbow-block-name "Rectangular" dim ang))
   (if (block-has-content name)
     name
     (progn
       (delete-block-def name)
-      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
-      (setq blocks (vla-get-Blocks doc))
-      (setq blk (vl-catch-all-apply 'vla-Add (list blocks (list 0.0 0.0 0.0) name)))
-      (setq ok (not (vl-catch-all-error-p blk)))
-      (if ok
-        (progn
-          (setq angRad (* ang (/ pi 180.0)))
-          (setq Tr (* *conducto-rect-elbow-leg-factor* dim))
-          (setq half (/ dim 2.0))
-          (setq cosA (cos angRad))
-          (setq sinA (sin angRad))
-          (setq v (list Tr 0.0))
-          (foreach s (list 1.0 -1.0)
-            (setq nearPt (list 0.0 (* s half)))
-            (setq vOffset (list (- Tr (* s half sinA)) (* s half cosA)))
-            (setq cornerPt (line-intersect nearPt 0.0 vOffset angRad))
-            (if cornerPt
-              (progn
-                (setq farPt (list (+ (car vOffset) (* Tr cosA)) (+ (cadr vOffset) (* Tr sinA))))
-                (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddLine
-                      (list blk (append nearPt (list 0.0)) (append cornerPt (list 0.0)))))
-                  (setq ok nil)
-                )
-                (if (vl-catch-all-error-p (vl-catch-all-apply 'vla-AddLine
-                      (list blk (append cornerPt (list 0.0)) (append farPt (list 0.0)))))
-                  (setq ok nil)
-                )
-              )
-              (setq ok nil)
-            )
+      (setq angRad (* ang (/ pi 180.0)))
+      (setq Tr (* *conducto-rect-elbow-leg-factor* dim))
+      (setq half (/ dim 2.0))
+      (setq cosA (cos angRad))
+      (setq sinA (sin angRad))
+      (setq v (list Tr 0.0))
+      (setq ents '())
+      (foreach s (list 1.0 -1.0)
+        (setq nearPt (list 0.0 (* s half)))
+        (setq vOffset (list (- Tr (* s half sinA)) (* s half cosA)))
+        (setq cornerPt (line-intersect nearPt 0.0 vOffset angRad))
+        (if cornerPt
+          (progn
+            (setq farPt (list (+ (car vOffset) (* Tr cosA)) (+ (cadr vOffset) (* Tr sinA))))
+            (setq ents (cons (entmakex (list '(0 . "LINE")
+                          (cons 10 (append nearPt (list 0.0))) (cons 11 (append cornerPt (list 0.0))))) ents))
+            (setq ents (cons (entmakex (list '(0 . "LINE")
+                          (cons 10 (append cornerPt (list 0.0))) (cons 11 (append farPt (list 0.0))))) ents))
           )
-          (setq attH (max 1.0 (* dim 0.12)))
-          (vl-catch-all-apply 'vla-AddAttribute
-            (list blk attH 0 "Ancho" (list (+ Tr (* dim 0.1)) (* dim -0.1) 0.0) "ANCHO" (rtos dim 2 0)))
-          (vl-catch-all-apply 'vla-AddAttribute
-            (list blk attH 0 "Angulo" (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0) "ANG" (rtos ang 2 1)))
-          (vl-catch-all-apply 'vla-AddAttribute
-            (list blk attH 0 "Tipo" (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0) "TIPO" "RECTANGULAR"))
+          (setq ents (cons nil ents))
         )
       )
-      (if ok
+      (setq attH (max 1.0 (* dim 0.12)))
+      (setq ents (cons (entmakex (list '(0 . "ATTDEF")
+                    (cons 10 (list (+ Tr (* dim 0.1)) (* dim -0.1) 0.0))
+                    (cons 40 attH) (cons 1 (rtos dim 2 0)) (cons 3 "Ancho") (cons 2 "ANCHO") '(70 . 0))) ents))
+      (setq ents (cons (entmakex (list '(0 . "ATTDEF")
+                    (cons 10 (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0))
+                    (cons 40 attH) (cons 1 (rtos ang 2 1)) (cons 3 "Angulo") (cons 2 "ANG") '(70 . 0))) ents))
+      (setq ents (cons (entmakex (list '(0 . "ATTDEF")
+                    (cons 10 (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0))
+                    (cons 40 attH) (cons 1 "RECTANGULAR") (cons 3 "Tipo") (cons 2 "TIPO") '(70 . 0))) ents))
+      (if (build-block-from-entities name ents)
         name
         (progn
           (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear el bloque de codo \"" name "\"."))
