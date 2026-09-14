@@ -224,12 +224,26 @@
 ;; depender en absoluto de la linea de comandos (ni de un posible
 ;; cuadro de dialogo de seleccion de archivo). Devuelve T si al final
 ;; esta disponible (ya lo estuviera, o se haya podido cargar).
-(defun ensure-center-linetype ( / doc lts)
+(defun ensure-center-linetype ( / doc lts ltfile)
   (if (not (tblsearch "LTYPE" "CENTER"))
     (progn
       (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
       (setq lts (vla-get-Linetypes doc))
-      (vl-catch-all-apply 'vla-Load (list lts "CENTER" "acad.lin"))
+      ;; findfile busca "acad.lin" en las rutas de soporte de AutoCAD
+      ;; y devuelve la ruta completa -pasarle solo "acad.lin" a
+      ;; vla-Load, sin ruta, puede no encontrarlo segun la carpeta de
+      ;; trabajo actual; con la ruta completa no depende de eso. Si
+      ;; findfile no lo encuentra, se prueba tal cual como ultimo
+      ;; recurso (y si tampoco existe "acadiso.lin", que en algunas
+      ;; plantillas tiene tambien CENTER).
+      (setq ltfile (findfile "acad.lin"))
+      (vl-catch-all-apply 'vla-Load (list lts "CENTER" (if ltfile ltfile "acad.lin")))
+      (if (not (tblsearch "LTYPE" "CENTER"))
+        (progn
+          (setq ltfile (findfile "acadiso.lin"))
+          (if ltfile (vl-catch-all-apply 'vla-Load (list lts "CENTER" ltfile)))
+        )
+      )
     )
   )
   (tblsearch "LTYPE" "CENTER")
@@ -502,8 +516,11 @@
 (defun insert-elbow (blkName insPt rotAng isLeft / doc ms result)
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq ms (vla-get-ModelSpace doc))
+  ;; vla-InsertBlock exige el punto como VARIANTE (a diferencia de
+  ;; entmake, que acepta listas de LISP normales) -sin vlax-3d-point,
+  ;; falla con "el valor lisp no tiene coercion con VARIANTE".
   (setq result (vl-catch-all-apply 'vla-InsertBlock
-                 (list ms (append insPt (list 0.0)) blkName 1.0 (if isLeft 1.0 -1.0) 1.0 rotAng)))
+                 (list ms (vlax-3d-point (append insPt (list 0.0))) blkName 1.0 (if isLeft 1.0 -1.0) 1.0 rotAng)))
   (if (vl-catch-all-error-p result)
     (progn
       (princ (strcat "\n[CONDUCTO] Aviso: fallo al insertar el codo (" (vl-catch-all-error-message result) ")."))
