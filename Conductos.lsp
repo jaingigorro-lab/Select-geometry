@@ -327,21 +327,6 @@
   )
 )
 
-;; Borra la definicion de bloque "name" si existe -para no dejar una
-;; definicion rota/vacia de un intento fallido envenenando para
-;; siempre los intentos siguientes con el mismo nombre-.
-(defun delete-block-def (name / ent obj)
-  (setq ent (tblobjname "BLOCK" name))
-  (if ent
-    (progn
-      (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ent)))
-      (if (not (vl-catch-all-error-p obj))
-        (vl-catch-all-apply 'vla-Delete (list obj))
-      )
-    )
-  )
-)
-
 ;; Construye la definicion de bloque "name" a partir de una lista de
 ;; entidades YA CREADAS en el espacio modelo (via entmake, en el
 ;; sistema local propio del bloque, alrededor del origen), usando el
@@ -352,7 +337,7 @@
 ;; entidad que quede suelta despues (tanto si el bloque se creo bien
 ;; como si DELOBJ dejaba copias sin borrar). Devuelve "name" si el
 ;; bloque quedo creado, o nil si no.
-(defun build-block-from-entities (name ents labels / ss e i failMsg)
+(defun build-block-from-entities (name ents labels / ss e i failMsg existed)
   (setq failMsg "")
   (setq i 0)
   (foreach e ents
@@ -368,7 +353,22 @@
     (progn
       (setq ss (ssadd))
       (foreach e ents (setq ss (ssadd e ss)))
-      (command "_.-BLOCK" name (list 0.0 0.0 0.0) ss "")
+      ;; Si el nombre de bloque YA existe (de un intento anterior en
+      ;; este mismo dibujo), -BLOCK pregunta "Desea redefinirlo?
+      ;; [Si/No]" antes de pedir el punto base -y si no se cuenta con
+      ;; esa pregunta, el punto base (0,0,0) se cuela como respuesta a
+      ;; ella y el comando se cancela ("Si o No.")-. Se contesta a esa
+      ;; pregunta SOLO cuando existe, para no desajustar la secuencia
+      ;; de prompts cuando el bloque es nuevo. Se usa "_Yes" -la
+      ;; palabra clave CANONICA en ingles, con el prefijo "_"- para que
+      ;; AutoCAD la traduzca sola al idioma de la sesion (p.ej. "Si" en
+      ;; español); escribir "_Si" no serviria, porque no es una palabra
+      ;; clave en ingles reconocida para traducir.
+      (setq existed (tblsearch "BLOCK" name))
+      (if existed
+        (command "_.-BLOCK" name "_Yes" (list 0.0 0.0 0.0) ss "")
+        (command "_.-BLOCK" name (list 0.0 0.0 0.0) ss "")
+      )
       (foreach e ents (if (entget e) (entdel e)))
       (if (tblsearch "BLOCK" name)
         name
@@ -390,7 +390,6 @@
   (if (block-has-content name)
     name
     (progn
-      (delete-block-def name)
       (setq R (* *conducto-radius-factor* dim))
       (setq angRad (* ang (/ pi 180.0)))
       (setq Ttan (* R (tan (/ angRad 2.0))))
@@ -443,7 +442,6 @@
   (if (block-has-content name)
     name
     (progn
-      (delete-block-def name)
       (setq angRad (* ang (/ pi 180.0)))
       (setq Tr (* *conducto-rect-elbow-leg-factor* dim))
       (setq half (/ dim 2.0))
