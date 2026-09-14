@@ -352,9 +352,16 @@
 ;; entidad que quede suelta despues (tanto si el bloque se creo bien
 ;; como si DELOBJ dejaba copias sin borrar). Devuelve "name" si el
 ;; bloque quedo creado, o nil si no.
-(defun build-block-from-entities (name ents / ss e)
-  (if (member nil ents)
+(defun build-block-from-entities (name ents labels / ss e i failMsg)
+  (setq failMsg "")
+  (setq i 0)
+  (foreach e ents
+    (if (not e) (setq failMsg (strcat failMsg (nth i labels) " ")))
+    (setq i (1+ i))
+  )
+  (if (/= failMsg "")
     (progn
+      (princ (strcat "\n[CONDUCTO] Aviso: fallo al crear la geometria del bloque \"" name "\" (" failMsg ")."))
       (foreach e ents (if (and e (entget e)) (entdel e)))
       nil
     )
@@ -363,7 +370,13 @@
       (foreach e ents (setq ss (ssadd e ss)))
       (command "_.-BLOCK" name (list 0.0 0.0 0.0) ss "")
       (foreach e ents (if (entget e) (entdel e)))
-      (if (tblsearch "BLOCK" name) name nil)
+      (if (tblsearch "BLOCK" name)
+        name
+        (progn
+          (princ (strcat "\n[CONDUCTO] Aviso: el comando -BLOCK no ha dejado creado \"" name "\"."))
+          nil
+        )
+      )
     )
   )
 )
@@ -391,18 +404,21 @@
                           (cons 50 (* 1.5 pi)) (cons 51 (+ (* 1.5 pi) angRad))))
           (entmakex (list '(0 . "ARC") (cons 10 center) (cons 40 innerR)
                           (cons 50 (* 1.5 pi)) (cons 51 (+ (* 1.5 pi) angRad))))
-          (entmakex (list '(0 . "ATTDEF")
+          (entmakex (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(100 . "AcDbText")
                           (cons 10 (list (+ Ttan (* dim 0.1)) (* dim -0.1) 0.0))
-                          (cons 40 attH) (cons 1 (rtos dim 2 0)) (cons 3 "Diametro") (cons 2 "DIAM") '(70 . 0)))
-          (entmakex (list '(0 . "ATTDEF")
+                          (cons 40 attH) (cons 1 (rtos dim 2 0)) '(100 . "AcDbAttributeDefinition")
+                          (cons 3 "Diametro") (cons 2 "DIAM") '(70 . 0)))
+          (entmakex (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(100 . "AcDbText")
                           (cons 10 (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0))
-                          (cons 40 attH) (cons 1 (rtos ang 2 1)) (cons 3 "Angulo") (cons 2 "ANG") '(70 . 0)))
-          (entmakex (list '(0 . "ATTDEF")
+                          (cons 40 attH) (cons 1 (rtos ang 2 1)) '(100 . "AcDbAttributeDefinition")
+                          (cons 3 "Angulo") (cons 2 "ANG") '(70 . 0)))
+          (entmakex (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(100 . "AcDbText")
                           (cons 10 (list (+ Ttan (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0))
-                          (cons 40 attH) (cons 1 "CIRCULAR") (cons 3 "Tipo") (cons 2 "TIPO") '(70 . 0)))
+                          (cons 40 attH) (cons 1 "CIRCULAR") '(100 . "AcDbAttributeDefinition")
+                          (cons 3 "Tipo") (cons 2 "TIPO") '(70 . 0)))
         )
       )
-      (if (build-block-from-entities name ents)
+      (if (build-block-from-entities name ents (list "arco-exterior" "arco-interior" "attdef-diametro" "attdef-angulo" "attdef-tipo"))
         name
         (progn
           (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear el bloque de codo \"" name "\"."))
@@ -442,25 +458,34 @@
         (if cornerPt
           (progn
             (setq farPt (list (+ (car vOffset) (* Tr cosA)) (+ (cadr vOffset) (* Tr sinA))))
-            (setq ents (cons (entmakex (list '(0 . "LINE")
-                          (cons 10 (append nearPt (list 0.0))) (cons 11 (append cornerPt (list 0.0))))) ents))
-            (setq ents (cons (entmakex (list '(0 . "LINE")
-                          (cons 10 (append cornerPt (list 0.0))) (cons 11 (append farPt (list 0.0))))) ents))
+            (setq ents (append ents (list
+              (entmakex (list '(0 . "LINE")
+                (cons 10 (append nearPt (list 0.0))) (cons 11 (append cornerPt (list 0.0)))))
+              (entmakex (list '(0 . "LINE")
+                (cons 10 (append cornerPt (list 0.0))) (cons 11 (append farPt (list 0.0)))))
+            )))
           )
-          (setq ents (cons nil ents))
+          (setq ents (append ents (list nil)))
         )
       )
       (setq attH (max 1.0 (* dim 0.12)))
-      (setq ents (cons (entmakex (list '(0 . "ATTDEF")
-                    (cons 10 (list (+ Tr (* dim 0.1)) (* dim -0.1) 0.0))
-                    (cons 40 attH) (cons 1 (rtos dim 2 0)) (cons 3 "Ancho") (cons 2 "ANCHO") '(70 . 0))) ents))
-      (setq ents (cons (entmakex (list '(0 . "ATTDEF")
-                    (cons 10 (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0))
-                    (cons 40 attH) (cons 1 (rtos ang 2 1)) (cons 3 "Angulo") (cons 2 "ANG") '(70 . 0))) ents))
-      (setq ents (cons (entmakex (list '(0 . "ATTDEF")
-                    (cons 10 (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0))
-                    (cons 40 attH) (cons 1 "RECTANGULAR") (cons 3 "Tipo") (cons 2 "TIPO") '(70 . 0))) ents))
-      (if (build-block-from-entities name ents)
+      (setq ents (append ents (list
+        (entmakex (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(100 . "AcDbText")
+                  (cons 10 (list (+ Tr (* dim 0.1)) (* dim -0.1) 0.0))
+                  (cons 40 attH) (cons 1 (rtos dim 2 0)) '(100 . "AcDbAttributeDefinition")
+                  (cons 3 "Ancho") (cons 2 "ANCHO") '(70 . 0)))
+        (entmakex (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(100 . "AcDbText")
+                  (cons 10 (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 1.4)) 0.0))
+                  (cons 40 attH) (cons 1 (rtos ang 2 1)) '(100 . "AcDbAttributeDefinition")
+                  (cons 3 "Angulo") (cons 2 "ANG") '(70 . 0)))
+        (entmakex (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(100 . "AcDbText")
+                  (cons 10 (list (+ Tr (* dim 0.1)) (- (* dim -0.1) (* attH 2.8)) 0.0))
+                  (cons 40 attH) (cons 1 "RECTANGULAR") '(100 . "AcDbAttributeDefinition")
+                  (cons 3 "Tipo") (cons 2 "TIPO") '(70 . 0)))
+      )))
+      (if (build-block-from-entities name ents
+            (list "linea-lado1-a" "linea-lado1-b" "linea-lado2-a" "linea-lado2-b"
+                  "attdef-ancho" "attdef-angulo" "attdef-tipo"))
         name
         (progn
           (princ (strcat "\n[CONDUCTO] Aviso: no se ha podido crear el bloque de codo \"" name "\"."))
