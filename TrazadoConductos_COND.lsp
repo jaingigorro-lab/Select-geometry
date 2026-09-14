@@ -144,9 +144,38 @@
   )
 )
 
+;; Se asegura de que el tipo de linea "CENTER" este cargado en el
+;; dibujo, cargandolo de acad.lin si hace falta. -LINETYPE Load puede
+;; abrir un cuadro de dialogo de seleccion de archivo si FILEDIA=1, asi
+;; que se pone FILEDIA a 0 mientras dura la carga (y se restaura
+;; despues) para que el comando lea "acad.lin" del propio macro en vez
+;; de quedarse esperando esa ventana. Devuelve T si al final esta
+;; disponible (ya lo estuviera, o se haya podido cargar).
+(defun ensure-center-linetype ( / oldFiledia)
+  (if (not (tblsearch "LTYPE" "CENTER"))
+    (progn
+      (setq oldFiledia (getvar "FILEDIA"))
+      (setvar "FILEDIA" 0)
+      (vl-catch-all-apply 'command (list "_.-LINETYPE" "_Load" "CENTER" "acad.lin" ""))
+      (setvar "FILEDIA" oldFiledia)
+    )
+  )
+  (tblsearch "LTYPE" "CENTER")
+)
+
+;; Marca una entidad como "linea de eje": gris (color ACI 8) y linea de
+;; trazo-punto "CENTER" si se ha podido cargar.
+(defun mark-as-axis (ent / obj)
+  (setq obj (vlax-ename->vla-object ent))
+  (if (ensure-center-linetype)
+    (vl-catch-all-apply 'vla-put-Linetype (list obj "CENTER"))
+  )
+  (vl-catch-all-apply 'vla-put-color (list obj 8))
+)
+
 (defun c:CONDUCTO
   ( / tipo diametro ancho beforeEnt plEnt rawPts pts n radius half
-      i a v c defl nearest warnCount tanlen offsets)
+      i a v c defl nearest warnCount tanlen offsets oldOrtho)
 
   (initget "Circular Rectangular")
   (setq tipo (getkword "\n[CONDUCTO] Tipo de conducto [Circular/Rectangular] <Circular>: "))
@@ -167,11 +196,23 @@
     )
   )
 
+  ;; Para rectangular, el unico codo que se genera es a escuadra (90),
+  ;; asi que se activa ORTHO mientras se traza para que el angulo salga
+  ;; normalizado el solo, sin depender de que el usuario se acuerde de
+  ;; activarlo (se puede seguir saltando puntualmente con MAYUS, y se
+  ;; restaura el ORTHO que hubiera al terminar). Para circular NO se
+  ;; fuerza -los codos normalizados admitidos (45/30/22.5/15) no son
+  ;; solo 90, así que forzar ORTHO estorbaria mas de lo que ayuda-.
+  (setq oldOrtho (getvar "ORTHOMODE"))
+  (if (= tipo "Rectangular") (setvar "ORTHOMODE" 1))
+
   (princ "\n[CONDUCTO] Traza el recorrido como una polilinea normal, solo tramos rectos (Intro para terminar): ")
   (setq beforeEnt (entlast))
   (command "_.PLINE")
   (while (> (getvar "CMDACTIVE") 0) (command pause))
   (setq plEnt (entlast))
+
+  (setvar "ORTHOMODE" oldOrtho)
 
   (if (or (not plEnt) (equal plEnt beforeEnt))
     (progn (princ "\n[CONDUCTO] No se ha trazado ningun recorrido. Cancelado.") (princ) (exit))
@@ -269,21 +310,11 @@
   ;; Doble contorno del conducto: dos desfases simetricos de la
   ;; polilinea de eje (ya con los codos, circulares o a escuadra, ya
   ;; resueltos), uno a cada lado. La linea de eje NO se borra: se deja
-  ;; en el dibujo como referencia del recorrido, marcada con la linea
-  ;; de trazo-punto "CENTER" tipica de un eje si esta cargada (o
-  ;; disponible en acad.lin) -si no, se queda con el tipo de linea
-  ;; continuo por defecto, sin que eso afecte al resto del comando.
+  ;; en el dibujo como referencia del recorrido, en gris y con trazo-
+  ;; punto "CENTER" (ver mark-as-axis).
   (setq offsets (append (offset-curve plEnt half) (offset-curve plEnt (- half))))
 
-  ;; Cargar un tipo de linea con "-LINETYPE Load" puede abrir un cuadro
-  ;; de dialogo de seleccion de archivo (si FILEDIA=1) y quedarse
-  ;; esperando esa ventana en vez del texto que se le pasa por comando
-  ;; -asi que, en vez de arriesgarse a eso, solo se aplica "CENTER" si
-  ;; ya esta cargado en el dibujo; si no lo esta, se deja la linea de
-  ;; eje en el tipo de linea continuo por defecto.
-  (if (tblsearch "LTYPE" "CENTER")
-    (vl-catch-all-apply 'vla-put-Linetype (list (vlax-ename->vla-object plEnt) "CENTER"))
-  )
+  (mark-as-axis plEnt)
 
   (if offsets
     (princ (strcat "\n[CONDUCTO] Conducto " tipo " creado con " (itoa (max 0 (- n 2))) " codo(s)"
