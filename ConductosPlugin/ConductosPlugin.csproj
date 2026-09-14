@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyTitle>Conductos HVAC</AssemblyTitle>
+    <Product>Conductos HVAC</Product>
+    <RootNamespace>ConductosPlugin</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- AutoCAD's .NET Framework runtime loads plugin DLLs directly; no copy-local of the
+         AutoCAD reference assemblies themselves (they must resolve against the real ones
+         already loaded inside AutoCAD.exe at runtime). -->
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- AutoCAD 2024 managed API reference assemblies (official Autodesk NuGet package).
+         CopyLocal is turned off below so the plugin binds to the real assemblies AutoCAD
+         itself loads at runtime, instead of shipping (and possibly conflicting with) its
+         own copies. -->
+    <PackageReference Include="AutoCAD.NET" Version="24.3.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <Target Name="DisableCopyLocalForAutoCAD" AfterTargets="ResolveReferences">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="$([System.String]::Copy('%(ReferenceCopyLocalPaths.Filename)').StartsWith('Ac'))" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Filename)' == 'accoremgd'" />
+    </ItemGroup>
+  </Target>
+
+</Project>
