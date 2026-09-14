@@ -1,32 +1,58 @@
 (vl-load-com)
 
 ;; ==========================================================
-;; CONDUCTO - Traza un recorrido de conducto de climatizacion (circular
-;; o rectangular) a doble linea y a escala real, insertando en cada
-;; cambio de direccion el codo normalizado correspondiente:
-;;   - Circular: codo curvo con radio 1.5 x diametro (SMACNA), tangente
-;;     a los dos tramos que conecta.
-;;   - Rectangular: codo a escuadra (mitrado a 90), sin radio -la
-;;     esquina recta habitual en conducto rectangular de chapa.
-;; En ambos casos se avisa (sin bloquear el dibujo) si el angulo de un
-;; codo no es uno de los normalizados habituales, para poder corregir
-;; el recorrido con ORTHO/polar si hace falta.
+;; CONDUCTOS - Herramientas de trazado de conductos de climatizacion.
 ;;
-;; Uso:
-;;   1. Ejecutar CONDUCTO.
-;;   2. Elegir tipo de conducto (Circular/Rectangular) y su dimension
-;;      (diametro, o ancho en planta).
-;;   3. Trazar el recorrido como una polilinea normal (con ORTHO, polar
-;;      u OSNAP si se quiere): un punto inicial, los puntos intermedios
-;;      donde el conducto cambia de direccion, e Intro para terminar.
-;;      No uses arcos dentro de esa polilinea: solo tramos rectos, los
-;;      codos los pone el comando.
-;;   4. El comando genera el doble contorno del conducto (dos lineas
-;;      paralelas separadas la dimension indicada) con los codos
-;;      normalizados ya insertados en cada vertice, y conserva la
-;;      polilinea de eje central usada como base (con linea de
-;;      trazo-punto "CENTER" si esta disponible en el dibujo).
+;; CONDUCTO - Traza un recorrido de conducto (circular o rectangular)
+;;   a doble linea y a escala real, insertando en cada cambio de
+;;   direccion el codo normalizado correspondiente:
+;;     - Circular: codo curvo con radio 1.5 x diametro (SMACNA),
+;;       tangente a los dos tramos que conecta.
+;;     - Rectangular: codo a escuadra (mitrado a 90), sin radio -la
+;;       esquina recta habitual en conducto rectangular de chapa-.
+;;   En ambos casos se avisa (sin bloquear el dibujo) si el angulo de
+;;   un codo no es uno de los normalizados habituales.
+;;
+;;   Uso:
+;;     1. Ejecutar CONDUCTO.
+;;     2. Elegir tipo de conducto (Circular/Rectangular) y su
+;;        dimension (diametro, o ancho en planta).
+;;     3. Trazar el recorrido como una polilinea normal: un punto
+;;        inicial, los puntos intermedios donde el conducto cambia de
+;;        direccion, e Intro para terminar. No uses arcos dentro de
+;;        esa polilinea: solo tramos rectos, los codos los pone el
+;;        comando. En rectangular se activa ORTHO automaticamente
+;;        mientras se traza, para que el angulo salga a 90 sin tener
+;;        que acordarse de activarlo (se puede saltar con MAYUS).
+;;     4. El comando genera el doble contorno del conducto con los
+;;        codos ya insertados, y conserva la polilinea de eje central
+;;        usada como base, en gris y con linea de trazo-punto
+;;        "CENTER".
+;;
+;; CONDUCTORAMAL - Inserta una union en T (un ramal) o en cruz (dos
+;;   ramales opuestos) sobre un conducto principal YA EXISTENTE
+;;   (trazado con CONDUCTO, o cualquier par de lineas/polilineas
+;;   paralelas que representen sus dos paredes). El conducto principal
+;;   NO se modifica: solo se lee para saber su ancho/diametro y por
+;;   donde pasa. Cada ramal se traza con su propio tipo y dimension, y
+;;   sus dos paredes se recortan automaticamente justo donde alcanzan
+;;   la pared del conducto principal mas cercana a el.
+;;
+;;   Limitacion: la union debe hacerse sobre un tramo RECTO del
+;;   conducto principal, no sobre un codo.
+;;
+;;   Uso:
+;;     1. Ejecutar CONDUCTORAMAL.
+;;     2. Elegir Te (un ramal) o Cruz (dos ramales opuestos, cada uno
+;;        con su propio tipo/dimension).
+;;     3. Seleccionar las DOS paredes del conducto principal, y pulsar
+;;        un punto aproximado de conexion sobre el.
+;;     4. Para cada ramal: elegir su tipo, su dimension, y pulsar su
+;;        punto final. En Cruz, el segundo ramal usa automaticamente
+;;        el punto opuesto (misma distancia, direccion contraria).
 ;; ==========================================================
+
+;; --- Parametros ---
 
 ;; Radio de los codos circulares = este factor x el diametro (1.5xD,
 ;; el estandar SMACNA habitual para codos de conducto circular).
@@ -37,6 +63,11 @@
 
 ;; Tolerancia (grados) para avisar de un angulo de codo no normalizado.
 (setq *conducto-angle-warn-tol-deg* 1.0)
+
+;; Tolerancia (grados) para avisar de que un ramal no sale perpendicular.
+(setq *ramal-angle-warn-tol-deg* 2.0)
+
+;; --- Utilidades compartidas ---
 
 ;; Concatena una lista de cadenas de texto con un separador.
 (defun implode-list (lst sep / result)
@@ -136,7 +167,7 @@
   (setq result (vl-catch-all-apply 'vla-Offset (list obj dist)))
   (if (vl-catch-all-error-p result)
     (progn
-      (princ (strcat "\n[CONDUCTO] Aviso: fallo el desfase a " (rtos dist 2 2)
+      (princ (strcat "\n[CONDUCTOS] Aviso: fallo el desfase a " (rtos dist 2 2)
                      " (" (vl-catch-all-error-message result) ")."))
       nil
     )
@@ -172,6 +203,29 @@
   )
   (vl-catch-all-apply 'vla-put-color (list obj 8))
 )
+
+;; Punto mas cercano a pt sobre la curva ent (LINE, LWPOLYLINE...).
+(defun curve-closest-point (ent pt)
+  (vlax-curve-getClosestPointTo (vlax-ename->vla-object ent) pt)
+)
+
+;; Direccion (angulo) tangente a la curva ent en el punto pt (que debe
+;; estar sobre ella, p.ej. el resultado de curve-closest-point).
+(defun curve-tangent-dir (ent pt / obj param deriv)
+  (setq obj (vlax-ename->vla-object ent))
+  (setq param (vlax-curve-getParamAtPoint obj pt))
+  (setq deriv (vlax-curve-getFirstDeriv obj param))
+  (angle (list 0.0 0.0 0.0) deriv)
+)
+
+;; Interseccion de la recta que pasa por p1 con direccion dir1, y la
+;; que pasa por p2 con direccion dir2 (rectas infinitas). nil si son
+;; paralelas.
+(defun line-intersect (p1 dir1 p2 dir2)
+  (inters p1 (polar p1 dir1 1.0) p2 (polar p2 dir2 1.0) nil)
+)
+
+;; --- CONDUCTO: trazado de un recorrido con codos automaticos ---
 
 (defun c:CONDUCTO
   ( / tipo diametro ancho beforeEnt plEnt rawPts pts n radius half
@@ -325,5 +379,108 @@
   (princ)
 )
 
-(princ "\nCONDUCTO cargado. Escribe 'CONDUCTO' para trazar un conducto circular o rectangular a doble linea, con codos normalizados.")
+;; --- CONDUCTORAMAL: uniones en T y en cruz sobre un conducto existente ---
+
+(defun c:CONDUCTORAMAL
+  ( / tipoUnion wall1 wall2 pctr p1 p2 centerPt halfMain
+      nBranches k branchTipo branchDim far1 farPt branchDirAng
+      crossDir dev1 dev2 defl nearPt tanDir branchCL wallEnts
+      w wEnt wPts wNearPt wFarPt ip)
+
+  (initget "Te Cruz")
+  (setq tipoUnion (getkword "\n[CONDUCTORAMAL] Tipo de union [Te/Cruz] <Te>: "))
+  (if (not tipoUnion) (setq tipoUnion "Te"))
+
+  (setq wall1 (car (entsel "\n[CONDUCTORAMAL] Selecciona la primera pared del conducto principal: ")))
+  (if (not wall1) (progn (princ "\n[CONDUCTORAMAL] Cancelado.") (princ) (exit)))
+  (setq wall2 (car (entsel "\n[CONDUCTORAMAL] Selecciona la segunda pared (la opuesta): ")))
+  (if (not wall2) (progn (princ "\n[CONDUCTORAMAL] Cancelado.") (princ) (exit)))
+
+  (setq pctr (getpoint "\n[CONDUCTORAMAL] Punto aproximado de conexion sobre el conducto principal: "))
+  (if (not pctr) (progn (princ "\n[CONDUCTORAMAL] Cancelado.") (princ) (exit)))
+
+  (setq p1 (curve-closest-point wall1 pctr))
+  (setq p2 (curve-closest-point wall2 pctr))
+  (setq centerPt (list (/ (+ (car p1) (car p2)) 2.0) (/ (+ (cadr p1) (cadr p2)) 2.0)))
+  (setq halfMain (/ (distance p1 p2) 2.0))
+  ;; p1-p2 es, para un tramo recto, perpendicular al eje del conducto
+  ;; principal (es la linea que une los dos pies de perpendicular desde
+  ;; el mismo punto de union a cada pared paralela) -sirve tal cual
+  ;; como referencia para comprobar si un ramal sale perpendicular.
+  (setq crossDir (angle p1 p2))
+
+  (setq nBranches (if (= tipoUnion "Cruz") 2 1))
+  (setq k 1)
+  (while (<= k nBranches)
+
+    (initget "Circular Rectangular")
+    (setq branchTipo (getkword (strcat "\n[CONDUCTORAMAL] Tipo del ramal " (itoa k) " [Circular/Rectangular] <Circular>: ")))
+    (if (not branchTipo) (setq branchTipo "Circular"))
+    (setq branchDim (getdist (strcat "\n[CONDUCTORAMAL] Dimension del ramal " (itoa k) " (diametro, o ancho en planta): ")))
+    (if (or (not branchDim) (<= branchDim 0))
+      (progn (princ "\n[CONDUCTORAMAL] Ramal cancelado.") (princ) (exit))
+    )
+
+    (if (and (= tipoUnion "Cruz") (= k 2))
+      ;; El segundo ramal de una cruz sale automaticamente hacia el
+      ;; lado opuesto al primero, misma distancia -no se vuelve a
+      ;; preguntar el punto final.
+      (setq farPt (list (- (* 2.0 (car centerPt)) (car far1)) (- (* 2.0 (cadr centerPt)) (cadr far1))))
+      (progn
+        (setq farPt (getpoint centerPt (strcat "\n[CONDUCTORAMAL] Punto final del ramal " (itoa k) ": ")))
+        (if (not farPt) (progn (princ "\n[CONDUCTORAMAL] Ramal cancelado.") (princ) (exit)))
+        (setq far1 farPt)
+      )
+    )
+
+    (setq branchDirAng (angle centerPt farPt))
+
+    ;; Aviso (no bloqueante) si el ramal no sale perpendicular al
+    ;; conducto principal -comparando contra las dos direcciones
+    ;; posibles de "cruzar" el conducto (una por cada lado).
+    (setq dev1 (abs (norm-pi (- branchDirAng crossDir))))
+    (setq dev2 (abs (norm-pi (- branchDirAng (+ crossDir pi)))))
+    (setq defl (* (min dev1 dev2) (/ 180.0 pi)))
+    (if (> defl *ramal-angle-warn-tol-deg*)
+      (princ (strcat "\n[CONDUCTORAMAL] Aviso: el ramal " (itoa k) " no sale perpendicular al conducto principal ("
+                     (rtos defl 2 1) " grados de desviacion)."))
+    )
+
+    ;; La pared del conducto principal mas cercana al ramal: contra esa
+    ;; es contra la que se recortan sus dos paredes -el ramal no debe
+    ;; atravesar el conducto principal ni quedarse corto antes de
+    ;; llegar a el-.
+    (if (< (distance farPt p1) (distance farPt p2))
+      (progn (setq nearPt p1) (setq tanDir (curve-tangent-dir wall1 p1)))
+      (progn (setq nearPt p2) (setq tanDir (curve-tangent-dir wall2 p2)))
+    )
+
+    ;; Eje y paredes del ramal (sin codos: un ramal es un tramo recto).
+    (setq branchCL (make-polyline (list centerPt farPt)))
+    (setq wallEnts (append (offset-curve branchCL (/ branchDim 2.0)) (offset-curve branchCL (- (/ branchDim 2.0)))))
+
+    (foreach w wallEnts
+      (setq wEnt (vlax-vla-object->ename w))
+      (setq wPts (get-polyline-points wEnt))
+      (if (< (distance (car wPts) centerPt) (distance (last wPts) centerPt))
+        (progn (setq wNearPt (car wPts)) (setq wFarPt (last wPts)))
+        (progn (setq wNearPt (last wPts)) (setq wFarPt (car wPts)))
+      )
+      (setq ip (line-intersect nearPt tanDir wNearPt branchDirAng))
+      (if ip
+        (progn (entdel wEnt) (make-polyline (list ip wFarPt)))
+        (princ (strcat "\n[CONDUCTORAMAL] Aviso: no se ha podido recortar una pared del ramal " (itoa k)
+                       " contra el conducto principal; se deja sin recortar."))
+      )
+    )
+
+    (mark-as-axis branchCL)
+    (setq k (1+ k))
+  )
+
+  (princ "\n[CONDUCTORAMAL] Union creada. El conducto principal no se ha modificado.")
+  (princ)
+)
+
+(princ "\nCONDUCTOS cargado. Escribe 'CONDUCTO' para trazar un conducto circular o rectangular, o 'CONDUCTORAMAL' para insertar una union en T o en cruz.")
 (princ)
