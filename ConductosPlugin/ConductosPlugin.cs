@@ -9,6 +9,10 @@ using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.GraphicsInterface;
 using Autodesk.AutoCAD.Runtime;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
+// Autodesk.AutoCAD.GraphicsInterface tambien define un tipo "Polyline" (para el jig,
+// mas abajo, WorldDraw/WorldGeometry) que choca con el de DatabaseServices, que es el
+// que se usa en todo el resto del archivo -de ahi el alias explicito.
+using Polyline = Autodesk.AutoCAD.DatabaseServices.Polyline;
 
 namespace ConductosPlugin
 {
