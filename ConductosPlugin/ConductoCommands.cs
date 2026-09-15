@@ -12,13 +12,13 @@ namespace ConductosPlugin
 {
     /// <summary>
     /// CONDUCTO - traza un recorrido de conducto (circular o rectangular) a doble
-    /// linea y a escala real, insertando en cada cambio de direccion un BLOQUE de
-    /// codo normalizado (con atributos DIAM/ANCHO, ANG, TIPO), reutilizado entre
-    /// codos con el mismo tipo/dimension/angulo. El eje trazado se conserva como
-    /// referencia, en gris con linea CENTER, siguiendo la forma real del conducto
-    /// (con el arco de cada codo circular, o pasando por el vertice en rectangular).
-    /// Un codo con un angulo que no sea uno de los normalizados hace que el
-    /// recorrido ENTERO se rechace, sin crear nada, antes de dibujar.
+    /// linea y a escala real. Solo admite giros a escuadra (90 grados): un vertice con
+    /// cualquier otro angulo hace que el recorrido ENTERO se rechace, sin crear nada,
+    /// antes de dibujar. En cada codo no se inserta ningun bloque ni texto: las dos
+    /// paredes siguen el recorrido con una esquina a inglete (offset de la polilinea
+    /// completa) y se marcan solo con dos lineas delimitadoras perpendiculares -una
+    /// donde empieza el codo y otra donde termina-, cruzando de pared a pared. El eje
+    /// (linea CENTER gris) sigue el recorrido real, vertice a vertice.
     /// </summary>
     public class ConductoCommands
     {
@@ -49,13 +49,12 @@ namespace ConductosPlugin
             double dim = pdr.Value;
             double half = dim / 2.0;
 
-            // Para rectangular, el unico codo que se genera es a escuadra (90), asi
-            // que se activa ORTHO mientras se traza para que el angulo salga
-            // normalizado solo (se puede saltar puntualmente con MAYUS, y se
-            // restaura el ORTHO que hubiera al terminar). Para circular no se fuerza
-            // -los codos normalizados admitidos (45/30/22.5/15) no son solo 90-.
+            // Solo se admiten codos a escuadra (90 grados), asi que se activa ORTHO
+            // mientras se traza para que el angulo salga normalizado solo (se puede
+            // saltar puntualmente con MAYUS, y se restaura el ORTHO que hubiera al
+            // terminar).
             object oldOrtho = AcApp.GetSystemVariable("ORTHOMODE");
-            if (tipo == "Rectangular") AcApp.SetSystemVariable("ORTHOMODE", 1);
+            AcApp.SetSystemVariable("ORTHOMODE", 1);
 
             var pts3d = new List<Point3d>();
             var pprFirst = ed.GetPoint(new PromptPointOptions("\n[CONDUCTO] Punto inicial del recorrido: "));
@@ -92,60 +91,53 @@ namespace ConductosPlugin
             List<Point2d> pts = GeometryUtil.SimplifyPoints(rawPts, 1e-6);
             int n = pts.Count;
 
-            // Validacion de angulos ANTES de crear nada: un codo con un angulo que no
-            // sea uno de los normalizados no llega a dibujarse -se rechaza el
-            // recorrido ENTERO y hay que corregirlo y volver a ejecutar CONDUCTO-.
+            // Validacion de angulos ANTES de crear nada: solo se admiten codos a
+            // escuadra (90 grados) -un vertice con cualquier otro angulo no llega a
+            // dibujarse, se rechaza el recorrido ENTERO y hay que corregirlo y volver
+            // a ejecutar CONDUCTO-.
             var badVertices = new List<(int idx, double ang)>();
             for (int i = 1; i < n - 1; i++)
             {
                 double defl = GeometryUtil.DeflectionDeg(pts[i - 1], pts[i], pts[i + 1]);
-                if (tipo == "Circular")
-                {
-                    var (_, diff) = GeometryUtil.NearestStandardAngle(defl);
-                    if (diff > GeometryUtil.AngleWarnTolDeg) badVertices.Add((i + 1, defl));
-                }
-                else if (Math.Abs(defl - 90.0) > GeometryUtil.AngleWarnTolDeg)
-                {
-                    badVertices.Add((i + 1, defl));
-                }
+                if (Math.Abs(defl - 90.0) > GeometryUtil.AngleWarnTolDeg) badVertices.Add((i + 1, defl));
             }
             if (badVertices.Count > 0)
             {
-                string validos = tipo == "Circular"
-                    ? $" (validos: {string.Join(", ", GeometryUtil.StandardAnglesDeg.Select(a => a.ToString("0.#")))})"
-                    : " (solo se admite 90 en rectangular)";
-                ed.WriteMessage($"\n[CONDUCTO] Recorrido RECHAZADO: hay codo(s) sin angulo normalizado{validos}:");
+                ed.WriteMessage("\n[CONDUCTO] Recorrido RECHAZADO: hay codo(s) sin angulo a escuadra (solo se admiten 90 grados):");
                 foreach (var bv in badVertices) ed.WriteMessage($"\n  - vertice {bv.idx}: {bv.ang:0.0} grados");
                 ed.WriteMessage("\n[CONDUCTO] No se ha creado ningun tramo ni codo. Corrige el recorrido (usa ORTHO/polar) y vuelve a ejecutar CONDUCTO.");
                 return;
             }
 
-            int nSegs = 0, nElbows = 0, warnCount = 0;
+            int nElbows = 0, warnCount = 0;
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
                 var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
-                // "boundaries": inicio/fin del recorrido y, por cada codo interior,
-                // sus dos puntos de conexion (tangencia en circular, union a inglete
-                // en rectangular) con los tramos rectos vecinos -en vez del vertice
-                // en bruto-.
-                var boundaries = new List<Point2d> { pts[0] };
+                // Eje de referencia: el recorrido real, vertice a vertice (los giros
+                // son todos a escuadra, asi que no hace falta arco/bulge).
+                Polyline axisPl = DrawingUtil.BuildPolyline(pts);
+                ms.AppendEntity(axisPl);
+                tr.AddNewlyCreatedDBObject(axisPl, true);
+                DrawingUtil.MarkAsAxis(tr, db, axisPl, dim / 20.0);
 
-                // "axisData": el eje de referencia SI sigue la forma real del
-                // conducto en cada codo (arco/bulge en circular, o pasando por el
-                // vertice real en rectangular), a diferencia de "boundaries".
-                var axisData = new List<(Point2d pt, double bulge)> { (pts[0], 0.0) };
+                // Las dos paredes del conducto: se desfasa la polilinea COMPLETA de una
+                // sola vez (no tramo a tramo), asi cada esquina sale a inglete de forma
+                // automatica -sin gaps ni piezas sueltas en los codos-.
+                List<Curve> wallsOuter = DrawingUtil.OffsetPolyline(tr, ms, axisPl, half);
+                List<Curve> wallsInner = DrawingUtil.OffsetPolyline(tr, ms, axisPl, -half);
+                int nSegs = wallsOuter.Count + wallsInner.Count;
+                if (wallsOuter.Count == 0 || wallsInner.Count == 0)
+                    ed.WriteMessage("\n[CONDUCTO] Aviso: fallo al generar las paredes del conducto.");
 
+                // En cada codo interior: dos lineas delimitadoras perpendiculares al
+                // tramo -donde empieza y donde termina el codo-, sin bloque ni texto.
+                double tlen = tipo == "Circular" ? DrawingUtil.RadiusFactor * dim : DrawingUtil.RectElbowLegFactor * dim;
                 for (int i = 1; i < n - 1; i++)
                 {
                     Point2d a = pts[i - 1], v = pts[i], c = pts[i + 1];
-                    double defl = GeometryUtil.DeflectionDeg(a, v, c);
-
-                    double tlen = tipo == "Circular"
-                        ? DrawingUtil.RadiusFactor * dim * Math.Tan(defl * Math.PI / 180.0 / 2.0)
-                        : DrawingUtil.RectElbowLegFactor * dim;
 
                     if (tlen > a.GetDistanceTo(v) || tlen > v.GetDistanceTo(c))
                     {
@@ -153,75 +145,24 @@ namespace ConductosPlugin
                         warnCount++;
                     }
 
-                    Point2d p1 = GeometryUtil.Polar(v, GeometryUtil.AngleTo(v, a), tlen);
-                    Point2d p2 = GeometryUtil.Polar(v, GeometryUtil.AngleTo(v, c), tlen);
-                    boundaries.Add(p1);
-
                     double angIn = GeometryUtil.AngleTo(a, v);
                     double angOut = GeometryUtil.AngleTo(v, c);
-                    var inDir = new Vector2d(Math.Cos(angIn), Math.Sin(angIn));
-                    var outDir = new Vector2d(Math.Cos(angOut), Math.Sin(angOut));
-                    double crossSign = GeometryUtil.Cross2D(inDir, outDir);
-                    bool isLeft = crossSign >= 0.0;
+                    Point2d p1 = GeometryUtil.Polar(v, GeometryUtil.AngleTo(v, a), tlen);
+                    Point2d p2 = GeometryUtil.Polar(v, GeometryUtil.AngleTo(v, c), tlen);
 
-                    if (tipo == "Circular")
-                    {
-                        double bulge = Math.Tan(defl * Math.PI / 180.0 / 4.0);
-                        if (!isLeft) bulge = -bulge;
-                        axisData.Add((p1, bulge));
-                        axisData.Add((p2, 0.0));
-                    }
-                    else
-                    {
-                        axisData.Add((p1, 0.0));
-                        axisData.Add((v, 0.0));
-                        axisData.Add((p2, 0.0));
-                    }
-
-                    ObjectId blockId = DrawingUtil.EnsureElbowBlock(tr, db, tipo, dim, defl);
-                    DrawingUtil.InsertElbow(tr, ms, blockId, p1, angIn, isLeft);
+                    DrawingUtil.AddElbowDelimiter(tr, ms, p1, angIn, dim);
+                    DrawingUtil.AddElbowDelimiter(tr, ms, p2, angOut, dim);
                     nElbows++;
-
-                    boundaries.Add(p2);
-                }
-
-                boundaries.Add(pts[n - 1]);
-                axisData.Add((pts[n - 1], 0.0));
-
-                Polyline axisPl = DrawingUtil.BuildPolylineWithBulge(axisData);
-                ms.AppendEntity(axisPl);
-                tr.AddNewlyCreatedDBObject(axisPl, true);
-                DrawingUtil.MarkAsAxis(tr, db, axisPl, dim / 20.0);
-
-                // Tramos rectos de pared: los pares que EMPIEZAN en indice PAR de
-                // "boundaries" (0,2,4...) son tramo recto; los que empiezan en indice
-                // IMPAR son el hueco que ya ocupa el bloque del codo -ahi no se
-                // dibuja nada, o saldria una pared diagonal atravesando el codo-.
-                for (int i = 0; i < boundaries.Count - 1; i += 2)
-                {
-                    Point2d a = boundaries[i], v = boundaries[i + 1];
-                    if (a.GetDistanceTo(v) <= 1e-6) continue;
-
-                    Polyline segPl = DrawingUtil.BuildPolyline(new List<Point2d> { a, v });
-                    ms.AppendEntity(segPl);
-                    tr.AddNewlyCreatedDBObject(segPl, true);
-
-                    List<Curve> off1 = DrawingUtil.OffsetPolyline(tr, ms, segPl, half);
-                    List<Curve> off2 = DrawingUtil.OffsetPolyline(tr, ms, segPl, -half);
-                    segPl.Erase();
-
-                    if (off1.Count > 0 && off2.Count > 0) nSegs++;
-                    else ed.WriteMessage("\n[CONDUCTO] Aviso: fallo al generar un tramo recto de pared.");
                 }
 
                 tr.Commit();
-            }
 
-            ed.Regen();
-            ed.WriteMessage(
-                $"\n[CONDUCTO] Conducto {tipo} creado: {nSegs} tramo(s) recto(s) y {nElbows} codo(s) normalizado(s) insertado(s) como bloque" +
-                (warnCount > 0 ? $", {warnCount} con aviso de tramo corto" : "") +
-                ". Eje central conservado.");
+                ed.Regen();
+                ed.WriteMessage(
+                    $"\n[CONDUCTO] Conducto {tipo} creado: {nSegs} tramo(s) de pared y {nElbows} codo(s) a 90 grados delimitado(s)" +
+                    (warnCount > 0 ? $", {warnCount} con aviso de tramo corto" : "") +
+                    ". Eje central conservado.");
+            }
         }
     }
 }

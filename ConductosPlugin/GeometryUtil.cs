@@ -12,7 +12,6 @@ namespace ConductosPlugin
     internal static class GeometryUtil
     {
         public const double AngleWarnTolDeg = 1.0;
-        public static readonly double[] StandardAnglesDeg = { 90.0, 45.0, 30.0, 22.5, 15.0 };
 
         public static double NormPi(double a)
         {
@@ -30,19 +29,6 @@ namespace ConductosPlugin
         }
 
         public static double AngleTo(Point2d from, Point2d to) => Math.Atan2(to.Y - from.Y, to.X - from.X);
-
-        /// <summary>(nearestStandardAngle, absoluteDifference) for a deflection angle.</summary>
-        public static (double nearest, double diff) NearestStandardAngle(double deg)
-        {
-            double best = StandardAnglesDeg[0];
-            double bestDiff = Math.Abs(deg - best);
-            foreach (double a in StandardAnglesDeg)
-            {
-                double d = Math.Abs(deg - a);
-                if (d < bestDiff) { bestDiff = d; best = a; }
-            }
-            return (best, bestDiff);
-        }
 
         /// <summary>Z component of the 2D cross product v1 x v2: positive = left turn (CCW), negative = right (CW).</summary>
         public static double Cross2D(Vector2d v1, Vector2d v2) => v1.X * v2.Y - v1.Y * v2.X;
