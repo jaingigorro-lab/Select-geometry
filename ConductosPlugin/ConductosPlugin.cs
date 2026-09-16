@@ -279,11 +279,19 @@ namespace ConductosPlugin
         {
             ObjectId id = EnsureElbowBlock(tr, db, Math.Abs(turnAngleDeg));
             double scaleF = diameter / CventConfig.ElbowReferenceDiameter;
-            double xScale = turnAngleDeg < 0.0 ? -scaleF : scaleF;
+            // El bloque se construye siempre para un giro a la IZQUIERDA, con el
+            // punto de tangencia de entrada en el origen y la direccion de entrada
+            // en +X local. Para un giro a la DERECHA hay que reflejar el bloque
+            // conservando esa direccion de entrada -por eso el reflejo es en Y (el
+            // eje de la propia direccion de entrada), NO en X: reflejar en X
+            // invertiria tambien la direccion de entrada 180 grados (el vector local
+            // (1,0) pasaria a (-1,0) tras el reflejo), dejando el codo insertado al
+            // reves respecto al tramo recto que lo precede.
+            double yScale = turnAngleDeg < 0.0 ? -scaleF : scaleF;
             var br = new BlockReference(new Point3d(t1.X, t1.Y, 0), id)
             {
                 Rotation = dirInAngle,
-                ScaleFactors = new Scale3d(xScale, scaleF, 1.0),
+                ScaleFactors = new Scale3d(scaleF, yScale, 1.0),
                 Layer = CventConfig.WallLayer,
             };
             owner.AppendEntity(br);
