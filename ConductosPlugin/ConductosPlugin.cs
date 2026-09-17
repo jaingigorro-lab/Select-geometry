@@ -211,16 +211,19 @@ namespace ConductosPlugin
         private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos)
         {
             var pos3d = new Point3d(pos.X, pos.Y, 0);
+            // El orden importa: fijar AlignmentPoint mientras Justify sigue en su
+            // valor por defecto (BaseLeft) lanza eNotApplicable -Justify tiene que
+            // fijarse ANTES de tocar AlignmentPoint.
             var attDef = new AttributeDefinition
             {
                 Position = pos3d,
-                AlignmentPoint = pos3d,
                 Height = 0.1,
                 Tag = tag,
                 Prompt = prompt,
                 TextString = "0",
-                Justify = AttachmentPoint.MiddleCenter,
                 Layer = "0",
+                Justify = AttachmentPoint.MiddleCenter,
+                AlignmentPoint = pos3d,
             };
             btr.AppendEntity(attDef);
             tr.AddNewlyCreatedDBObject(attDef, true);
@@ -270,6 +273,9 @@ namespace ConductosPlugin
                     mid.X + perp.X * (diameter / 2.0 + h * lineOffset),
                     mid.Y + perp.Y * (diameter / 2.0 + h * lineOffset));
                 var pos3d = new Point3d(pos.X, pos.Y, 0);
+                // Igual que en AddAttDef: Justify tiene que fijarse ANTES de tocar
+                // AlignmentPoint, o AutoCAD lanza eNotApplicable.
+                attRef.Justify = AttachmentPoint.MiddleCenter;
                 attRef.Position = pos3d;
                 attRef.AlignmentPoint = pos3d;
                 attRef.Height = h;
