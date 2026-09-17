@@ -187,7 +187,11 @@ namespace ConductosPlugin
 
         /// <summary>Tramo recto de longitud UNIDAD (1): dos lineas paralelas de (0,+-r)
         /// a (1,+-r) en la capa "0" (para heredar la capa de la insercion). Al
-        /// insertarse se estira en X = longitud real.</summary>
+        /// insertarse se estira en X = longitud real. Incluye dos definiciones de
+        /// atributo (ANCHO, LARGO) -su geometria aqui es solo una plantilla minima
+        /// valida; la posicion/altura/valor reales de cada instancia se fijan aparte
+        /// en SetSizeAttributes, para que el texto no salga deformado al estirar el
+        /// bloque en X-.</summary>
         public static ObjectId EnsureStraightBlock(Transaction tr, Database db, double diameter)
         {
             string name = StraightBlockName(diameter);
@@ -197,7 +201,81 @@ namespace ConductosPlugin
             double r = diameter / 2.0;
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, r), new Point2d(1, r), "0");
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, -r), new Point2d(1, -r), "0");
+
+            AddAttDef(tr, btr, "ANCHO", "Ancho (diametro)", new Point2d(0.5, 0.0));
+            AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0.5, -0.2));
+
             return btr.ObjectId;
+        }
+
+        private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos)
+        {
+            var pos3d = new Point3d(pos.X, pos.Y, 0);
+            var attDef = new AttributeDefinition
+            {
+                Position = pos3d,
+                AlignmentPoint = pos3d,
+                Height = 0.1,
+                Tag = tag,
+                Prompt = prompt,
+                TextString = "0",
+                Justify = AttachmentPoint.MiddleCenter,
+                Layer = "0",
+            };
+            btr.AppendEntity(attDef);
+            tr.AddNewlyCreatedDBObject(attDef, true);
+        }
+
+        /// <summary>Crea las AttributeReference de un bloque recien insertado, una por
+        /// cada AttributeDefinition no constante de su definicion (br debe estar ya
+        /// insertado y con BlockTransform valido).</summary>
+        private static void PopulateAttributesFromBlock(Transaction tr, BlockReference br, ObjectId blockDefId)
+        {
+            var btr = (BlockTableRecord)tr.GetObject(blockDefId, OpenMode.ForRead);
+            foreach (ObjectId defId in btr)
+            {
+                var defEnt = tr.GetObject(defId, OpenMode.ForRead);
+                if (defEnt is AttributeDefinition attDef && !attDef.Constant)
+                {
+                    var attRef = new AttributeReference();
+                    attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
+                    attRef.TextString = attDef.TextString;
+                    br.AttributeCollection.AppendAttribute(attRef);
+                    tr.AddNewlyCreatedDBObject(attRef, true);
+                }
+            }
+        }
+
+        /// <summary>Fija la posicion (junto al punto medio real del tramo), altura
+        /// (proporcional al diametro) y valor de los atributos ANCHO/LARGO de un
+        /// tramo recto -de forma independiente al ScaleFactors del BlockReference,
+        /// para que el texto no salga estirado/deformado al escalar el bloque en X-.
+        /// No hace nada si el bloque no tiene esos atributos (p.ej. una reduccion, o
+        /// un codo). Hay que volver a llamarla cada vez que cambie la longitud real
+        /// del tramo (vease DuctTracer -el eje/pared se puede recortar despues, al
+        /// procesar un codo).</summary>
+        public static void SetSizeAttributes(Transaction tr, BlockReference br, Point2d startPt, double dirAngle, double length, double diameter)
+        {
+            var dir = new Vector2d(Math.Cos(dirAngle), Math.Sin(dirAngle));
+            Vector2d perp = GeometryUtil.LeftNormal(dir);
+            var mid = new Point2d(startPt.X + dir.X * length / 2.0, startPt.Y + dir.Y * length / 2.0);
+            double h = Math.Max(diameter * 0.2, 1.0);
+
+            foreach (ObjectId attId in br.AttributeCollection)
+            {
+                var attRef = (AttributeReference)tr.GetObject(attId, OpenMode.ForWrite);
+                bool isAncho = string.Equals(attRef.Tag, "ANCHO", StringComparison.OrdinalIgnoreCase);
+                double lineOffset = isAncho ? 1.0 : 2.4;
+                var pos = new Point2d(
+                    mid.X + perp.X * (diameter / 2.0 + h * lineOffset),
+                    mid.Y + perp.Y * (diameter / 2.0 + h * lineOffset));
+                var pos3d = new Point3d(pos.X, pos.Y, 0);
+                attRef.Position = pos3d;
+                attRef.AlignmentPoint = pos3d;
+                attRef.Height = h;
+                attRef.Rotation = dirAngle;
+                attRef.TextString = (isAncho ? diameter : length).ToString("0");
+            }
         }
 
         /// <summary>Reduccion de longitud UNIDAD (1): radio r1 en x=0 a radio r2 en
@@ -258,6 +336,9 @@ namespace ConductosPlugin
             };
             owner.AppendEntity(br);
             tr.AddNewlyCreatedDBObject(br, true);
+
+            PopulateAttributesFromBlock(tr, br, id);
+            SetSizeAttributes(tr, br, startPt, dirAngle, length, diameter);
             return br;
         }
 
@@ -325,6 +406,17 @@ namespace ConductosPlugin
         /// calcular esa union-. El eje (capa aparte) SI se dibuja siempre, con o sin
         /// bloque.</summary>
         public bool WallsAlreadyDrawn;
+
+        /// <summary>Si esta pieza se dibujo como bloque (tramo recto o reduccion), su
+        /// ObjectId -para poder RECORTARLO despues si el vertice de salida resulta
+        /// ser un codo (el bloque se inserta con la longitud completa al primer
+        /// clic, antes de saber si ese punto sera un codo o no; ver
+        /// DuctTracer.AdjustBodyLength)-. ObjectId.Null si no aplica.</summary>
+        public ObjectId BodyBlockId = ObjectId.Null;
+
+        /// <summary>Punto real de inicio del cuerpo (bloque) de esta pieza -para
+        /// recalcular su longitud en AdjustBodyLength-.</summary>
+        public Point2d BodyStartPt;
     }
 
     /// <summary>
@@ -392,21 +484,44 @@ namespace ConductosPlugin
         public static PendingPiece DrawPiece(Transaction tr, Database db, BlockTableRecord ms, PendingPiece oldPending, Point2d startPt, Point2d endPt, double startRadius, double endRadius, bool useBlocks)
         {
             bool drewBlock = false;
+            ObjectId bodyId = ObjectId.Null;
             if (useBlocks)
             {
                 Vector2d dir = GeometryUtil.UnitVector(startPt, endPt);
                 double dirAngle = GeometryUtil.VectorAngle(dir);
                 double length = startPt.GetDistanceTo(endPt);
-                if (Math.Abs(startRadius - endRadius) < 1e-9)
-                    BlockFactory.InsertStraight(tr, db, ms, startPt, dirAngle, length, 2.0 * startRadius);
-                else
-                    BlockFactory.InsertReduction(tr, db, ms, startPt, dirAngle, length, 2.0 * startRadius, 2.0 * endRadius);
+                BlockReference br = Math.Abs(startRadius - endRadius) < 1e-9
+                    ? BlockFactory.InsertStraight(tr, db, ms, startPt, dirAngle, length, 2.0 * startRadius)
+                    : BlockFactory.InsertReduction(tr, db, ms, startPt, dirAngle, length, 2.0 * startRadius, 2.0 * endRadius);
+                bodyId = br.ObjectId;
                 drewBlock = true;
             }
 
             PendingPiece pending = ProcessNextPiece(tr, ms, oldPending, startPt, endPt, startRadius, endRadius);
             pending.WallsAlreadyDrawn = drewBlock;
+            pending.BodyBlockId = bodyId;
+            pending.BodyStartPt = startPt;
             return pending;
+        }
+
+        /// <summary>Recorta (o alarga) el bloque de cuerpo de "piece" -tramo recto o
+        /// reduccion- para que termine exactamente en newEndPt, en vez de en el
+        /// vertice bruto con el que se inserto la primera vez (el bloque se inserta
+        /// al hacer clic en el punto, antes de saber si ese punto se convertira en un
+        /// codo; solo entonces, aqui, se sabe el punto de tangencia real donde debe
+        /// terminar). Tambien actualiza sus atributos ANCHO/LARGO -si los tiene- a la
+        /// longitud recortada. No hace nada si "piece" no se dibujo como bloque.</summary>
+        private static void AdjustBodyLength(Transaction tr, PendingPiece piece, Point2d newEndPt)
+        {
+            if (!piece.WallsAlreadyDrawn || piece.BodyBlockId.IsNull) return;
+
+            var br = (BlockReference)tr.GetObject(piece.BodyBlockId, OpenMode.ForWrite);
+            double newLength = piece.BodyStartPt.GetDistanceTo(newEndPt);
+            if (newLength < 1e-6) newLength = 1e-6;
+            br.ScaleFactors = new Scale3d(newLength, br.ScaleFactors.Y, br.ScaleFactors.Z);
+
+            double dirAngle = GeometryUtil.VectorAngle(piece.Dir);
+            BlockFactory.SetSizeAttributes(tr, br, piece.BodyStartPt, dirAngle, newLength, piece.Radius * 2.0);
         }
 
         /// <summary>Codo curvo entre el final de la pieza pendiente y el inicio de la
@@ -457,6 +572,14 @@ namespace ConductosPlugin
             {
                 DrawingUtil.DrawLine(tr, ms, oldPending.FinalStartL, t1L, CventConfig.WallLayer);
                 DrawingUtil.DrawLine(tr, ms, oldPending.FinalStartR, t1R, CventConfig.WallLayer);
+            }
+            else
+            {
+                // La pared de la pieza pendiente ya es un bloque, insertado con la
+                // longitud completa hasta el vertice bruto (antes de saber que ese
+                // vertice seria un codo) -se recorta ahora para que termine justo en
+                // el punto de tangencia t1, igual que el eje.
+                AdjustBodyLength(tr, oldPending, t1);
             }
             DrawingUtil.DrawLine(tr, ms, oldPending.CenterStart, t1, CventConfig.AxisLayer);
             DrawingUtil.DrawLine(tr, ms, t1L, t1R, CventConfig.WallLayer); // marca perpendicular: inicio del codo
