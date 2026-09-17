@@ -687,7 +687,14 @@ namespace ConductosPlugin
     {
         public static void TraceDuctRun(Database db, Editor ed, double diam, Point2d p0, PendingPiece pending, Vector2d? lastDir, bool restrictAngles, string cmdTag)
         {
-            const bool useBlocks = true; // los bloques se generan solos, vease BlockFactory
+            // DESACTIVADO TEMPORALMENTE (diagnostico): con "true" aparecia un
+            // abanico de lineas mal insertadas -radiando desde un mismo punto- tras
+            // un trazado de solo 3 tramos y 2 codos, sin que el bucle de trazado se
+            // repitiera de mas (confirmado por el log de comandos). Con "false" se
+            // vuelve al dibujo con lineas/arcos sueltos (sin bloques, sin
+            // atributos), la parte mas sencilla y ya validada geometricamente, para
+            // aislar si el fallo esta en la insercion/escalado de bloques.
+            const bool useBlocks = false;
             double? pendDiam = null;
             int segCount = 0, redCount = 0, elbowCount = 0;
             bool done = false;
