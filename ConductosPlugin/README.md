@@ -19,18 +19,18 @@ que se acoplan a un conducto ya existente.
     En el dibujo solo se ve el diámetro del tramo recto; la sección del propio
     codo queda solo en Propiedades, nunca dibujada.
   - **Rectangular**: pide ancho y alto; los giros se ajustan al mismo
-    múltiplo de 15° (hasta 90°) que en circular, con el mismo criterio de
-    codo **delimitado** que en circular (dos marcas perpendiculares,
-    inicio/fin) pero **a inglete/bisel** en vez de curvo (bloque de 3 líneas
-    rectas en vez de 3 arcos) — un extremo cortado en ángulo no se puede
-    representar estirando un bloque de paredes de extremos siempre
-    perpendiculares, así que solo el codo usa bloque; las paredes de los
-    tramos rectos siguen siendo líneas sueltas. La sección del codo (igual
-    que en circular) queda solo en Propiedades, nunca dibujada. Cada tramo
-    recto lleva un rótulo "ANCHOxLARGO" en una misma fila (el "x" es un
-    separador fijo, no un atributo, para que ANCHO y LARGO se sigan pudiendo
-    extraer como valores numéricos independientes); ALTO tambien queda
-    disponible, pero solo en Propiedades.
+    múltiplo de 15° (hasta 90°) que en circular, resueltos como **miter
+    recto** — sin radio, sin bisel, sin ninguna geometría de codo aparte: es
+    como es un codo rectangular real (una pared cortada en ángulo no se puede
+    fabricar con radio salvo que se pida expresamente una pieza curva, cosa
+    que este plugin no modela); las dos paredes de los tramos que se
+    encuentran simplemente se cortan en su intersección exacta, a cualquier
+    ángulo. La sección del codo (igual que en circular) queda solo en
+    Propiedades, nunca dibujada. Cada tramo recto lleva un rótulo
+    "ANCHOxLARGO" en una misma fila (el "x" es un separador fijo, no un
+    atributo, para que ANCHO y LARGO se sigan pudiendo extraer como valores
+    numéricos independientes); ALTO también queda disponible, pero solo en
+    Propiedades.
 
   Al principio también se preguntan la **altura de texto** de los rótulos, la
   **separación** entre el rótulo y la pared del conducto, y cada cuánto
@@ -71,27 +71,35 @@ de `ConductosPlugin.cs`) y los reutiliza después:
 
 - `CVENT_TRAMO_RECTO_D<diámetro>` y `CVENT_REDUCCION_D<d1>_D<d2>` — un cuerpo de
   longitud **unidad** (1) que se estira en X (`ScaleFactors`) a la longitud real
-  de cada tramo al insertarse. Sin atributos (ver más abajo por qué). Solo
-  existen para conductos **circulares**: el tipo rectangular siempre dibuja
-  las paredes de sus tramos rectos con líneas sueltas (un extremo cortado en
-  ángulo no se puede representar estirando un bloque de extremos siempre
-  perpendiculares), resolviendo sus esquinas con el mismo cierre a inglete
-  (`ProcessNextPiece`) que ya usan las reducciones y transiciones.
-- `CVENT_CODO_A<ángulo>` (circular) / `CVENT_CODO_RECT_A<ángulo>`
-  (rectangular) — un único bloque por ángulo normalizado (15/30/45/60/75/90) y
-  por tipo, construido a un ancho/diámetro de referencia (100); se inserta
-  escalado uniformemente al ancho/diámetro real, y reflejado (`ScaleFactors.Y`
-  negativo, ver más abajo por qué Y y no X) para un giro a la derecha. El
-  circular es curvo (tres arcos concéntricos: pared interior, eje, pared
-  exterior); el rectangular es un inglete a bisel (las mismas tres líneas,
-  pero rectas) — ambos ocupan la misma longitud a lo largo del tramo (según
-  `ElbowRadiusFactor`) y quedan delimitados por las mismas dos marcas
-  perpendiculares de inicio/fin, calculadas y dibujadas por
-  `DuctTracer.ProcessElbow` para los dos tipos por igual.
-- `CVENT_ROTULO_CIRC` / `CVENT_ROTULO_RECT` — el rótulo de cada tramo (ver
-  siguiente sección), con sus atributos ANCHO/ALTO/LARGO. Es el único bloque
-  que usa **siempre** el tipo rectangular (para las paredes de tramo recto no,
-  como se explica arriba).
+  de cada tramo al insertarse. Sin atributos (ver más abajo por qué).
+- `CVENT_CODO_A<ángulo>` — un único bloque por ángulo normalizado (15/30/45/
+  60/75/90), construido a un diámetro de referencia (100) con tres arcos
+  concéntricos (pared interior, eje, pared exterior); se inserta escalado
+  uniformemente al diámetro real, y reflejado (`ScaleFactors.Y` negativo, ver
+  más abajo por qué Y y no X) para un giro a la derecha.
+- `CVENT_ROTULO_CIRC` / `CVENT_ROTULO_RECT` — el rótulo de cada tramo recto
+  (ver siguiente sección), con sus atributos ANCHO/ALTO/LARGO.
+- `CVENT_ROTULO_RECT_CODO` — variante de `CVENT_ROTULO_RECT` usada
+  **exclusivamente** para la sección de un codo rectangular (siempre
+  invisible en el dibujo, solo Propiedades): tres atributos apilados
+  (ANCHO/ALTO/LARGO), sin ninguna otra geometría. Hace falta como bloque
+  aparte porque `CVENT_ROTULO_RECT` lleva el separador "x" fijo (texto
+  normal, no atributo) entre ANCHO y LARGO para el formato visible
+  "ANCHOxLARGO" — y una entidad no-atributo dentro de un bloque **siempre**
+  se dibuja, pase lo que pase con la visibilidad de sus atributos, así que
+  insertar un codo con ese mismo bloque dejaría el "x" (fantasma, sin
+  números) visible en el dibujo pese al `forceInvisible`. El circular no
+  necesita nada de esto: su bloque de tramo recto no lleva ninguna geometría
+  fija, así que lo reutiliza tal cual para los codos.
+
+Solo el tipo **circular** usa bloque de **codo**: un codo real en un conducto
+rectangular es un simple corte a inglete (sin radio, sin bisel — una pieza
+curva rectangular es un encargo especial que este plugin no modela), así que
+sus paredes simplemente se cortan en su intersección exacta con el mismo
+cierre a inglete (`DuctTracer.ProcessNextPiece`) que ya usan las reducciones y
+transiciones, sin ninguna geometría de codo aparte. El rótulo, en cambio,
+**siempre** es un bloque (`CVENT_ROTULO_*`), tanto en circular como en
+rectangular.
 
 ### Por qué el rótulo es un bloque APARTE, no un atributo del tramo recto
 

@@ -22,13 +22,12 @@ namespace ConductosPlugin
     //     CREA el mismo contrato de bloques (CVENT_TRAMO_RECTO,
     //     CVENT_REDUCCION, CVENT_CODO_A<angulo>) la primera vez que hace
     //     falta, vease BlockFactory.
-    //   - Se anade el tipo RECTANGULAR: sin bloques de PARED (una pared a
-    //     inglete no se puede representar estirando en X un bloque de
-    //     extremos siempre perpendiculares), pero SI de codo
-    //     (CVENT_CODO_RECT_A<angulo>, un bloque a bisel -tres lineas rectas
-    //     paralelas- en vez de tres arcos concentricos) y de rotulo
-    //     (CVENT_ROTULO_RECT), con los mismos angulos normalizados que el
-    //     circular.
+    //   - Se anade el tipo RECTANGULAR: sin bloques de pared NI de codo -un
+    //     codo real en conducto rectangular es un simple miter recto, sin
+    //     radio: las dos paredes se cortan en su interseccion exacta a
+    //     cualquier angulo, sin ninguna geometria de codo aparte- pero SI de
+    //     rotulo (CVENT_ROTULO_RECT), con los mismos angulos normalizados
+    //     que el circular.
     //
     // CVENT  - traza un conducto nuevo desde cero, punto a punto. Primero
     //          pregunta el tipo (Circular/Rectangular).
@@ -158,14 +157,14 @@ namespace ConductosPlugin
     /// <summary>
     /// Genera (la primera vez que hace falta) y despues inserta los bloques del
     /// contrato CVENT: CVENT_TRAMO_RECTO_D&lt;diam&gt;, CVENT_REDUCCION_D&lt;d1&gt;_D&lt;d2&gt;,
-    /// CVENT_CODO_A&lt;angulo&gt; (circular, tres arcos concentricos) y
-    /// CVENT_CODO_RECT_A&lt;angulo&gt; (rectangular, tres lineas rectas a bisel). El LSP
+    /// CVENT_CODO_A&lt;angulo&gt; (solo circular; el rectangular no usa bloque de
+    /// codo, vease DuctRunner.TraceDuctRun) y CVENT_ROTULO_CIRC/RECT. El LSP
     /// original necesitaba que estos bloques existieran ya en una libreria .dwg
     /// construida a mano (AutoLISP no puede crear bloques dinamicos); en C# se
     /// generan directamente, como bloques normales (no dinamicos): el tramo recto y
     /// la reduccion usan un cuerpo de longitud UNIDAD que se estira en X al
-    /// insertarse (ScaleFactors), y cada codo se construye a un ancho/diametro de
-    /// referencia y se inserta escalado uniformemente al ancho/diametro real.
+    /// insertarse (ScaleFactors), y el codo se construye a un diametro de
+    /// referencia y se inserta escalado uniformemente al diametro real.
     /// </summary>
     internal static class BlockFactory
     {
@@ -274,53 +273,6 @@ namespace ConductosPlugin
             return btr.ObjectId;
         }
 
-        public static string ElbowBlockNameRect(double angleDegAbs) => $"CVENT_CODO_RECT_A{Tag(Math.Round(angleDegAbs / CventConfig.AngleStepCircular) * CventConfig.AngleStepCircular)}";
-
-        /// <summary>
-        /// Version rectangular de EnsureElbowBlock: mismo concepto (un unico bloque
-        /// por angulo normalizado, giro siempre hacia la izquierda, origen = punto de
-        /// tangencia de entrada, eje +X = direccion de entrada, mismo
-        /// ElbowReferenceDiameter/ElbowRadiusFactor para que "cuanto ocupa el codo a
-        /// lo largo del tramo" sea igual de largo que en circular), pero un giro
-        /// rectangular es un inglete -sin curva-: en vez de tres arcos concentricos,
-        /// tres lineas rectas paralelas (pared interior, eje, pared exterior) desde
-        /// el punto de tangencia de entrada hasta el de salida, formando el corte a
-        /// bisel tipico de un codo de inglete en conducto rectangular.
-        /// </summary>
-        public static ObjectId EnsureElbowBlockRectangular(Transaction tr, Database db, double angleDegAbs)
-        {
-            double snapped = Math.Round(angleDegAbs / CventConfig.AngleStepCircular) * CventConfig.AngleStepCircular;
-            string name = ElbowBlockNameRect(snapped);
-            BlockTableRecord btr = GetOrCreateEmptyBlock(tr, db, name);
-            if (btr == null) return ExistingId(tr, db, name);
-
-            double r = CventConfig.ElbowReferenceDiameter / 2.0;
-            double bendRadius = CventConfig.ElbowRadiusFactor * CventConfig.ElbowReferenceDiameter;
-            double halfAngle = GeometryUtil.Dtr(snapped) / 2.0;
-            double d = Math.Cos(halfAngle) > 1e-6 ? bendRadius * Math.Tan(halfAngle) : bendRadius;
-
-            var t1 = new Point2d(0, 0);
-            var dirIn = new Vector2d(1, 0);
-            var vertex = new Point2d(d, 0);
-            double angRad = GeometryUtil.Dtr(snapped);
-            var dirOut = new Vector2d(Math.Cos(angRad), Math.Sin(angRad));
-            var t2 = new Point2d(vertex.X + dirOut.X * d, vertex.Y + dirOut.Y * d);
-
-            Vector2d leftIn = GeometryUtil.LeftNormal(dirIn), rightIn = GeometryUtil.RightNormal(dirIn);
-            Vector2d leftOut = GeometryUtil.LeftNormal(dirOut), rightOut = GeometryUtil.RightNormal(dirOut);
-
-            var innerStart = new Point2d(t1.X + leftIn.X * r, t1.Y + leftIn.Y * r);
-            var innerEnd = new Point2d(t2.X + leftOut.X * r, t2.Y + leftOut.Y * r);
-            var outerStart = new Point2d(t1.X + rightIn.X * r, t1.Y + rightIn.Y * r);
-            var outerEnd = new Point2d(t2.X + rightOut.X * r, t2.Y + rightOut.Y * r);
-
-            DrawingUtil.DrawLine(tr, btr, innerStart, innerEnd, CventConfig.WallLayer);
-            DrawingUtil.DrawLine(tr, btr, t1, t2, CventConfig.AxisLayer);
-            DrawingUtil.DrawLine(tr, btr, outerStart, outerEnd, CventConfig.WallLayer);
-
-            return btr.ObjectId;
-        }
-
         public static BlockReference InsertStraight(Transaction tr, Database db, BlockTableRecord owner, Point2d startPt, double dirAngle, double length, double diameter)
         {
             ObjectId id = EnsureStraightBlock(tr, db, diameter);
@@ -390,11 +342,38 @@ namespace ConductosPlugin
             }
             else
             {
+                // Huecos generosos (ANCHO y LARGO pueden tener hasta 4-5 cifras en
+                // mm) para que no se solapen entre si ni con el separador "x".
                 AddAttDef(tr, btr, "ANCHO", "Ancho", new Point2d(0, 0), lineH, "0", false);
-                AddStaticText(tr, btr, "x", new Point2d(2.2, 0), lineH);
-                AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(2.8, 0), lineH, "0", false);
+                AddStaticText(tr, btr, "x", new Point2d(3.0, 0), lineH);
+                AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(3.6, 0), lineH, "0", false);
                 AddAttDef(tr, btr, "ALTO", "Alto", new Point2d(0, -lineGap), lineH, "0", true);
             }
+
+            return btr.ObjectId;
+        }
+
+        /// <summary>Bloque de rotulo usado EXCLUSIVAMENTE para la seccion de un codo
+        /// (forceInvisible en InsertLabel): solo atributos, ninguna geometria fija
+        /// (ni el separador "x" del bloque de tramo recto) -una entidad no-atributo
+        /// dentro de un bloque SIEMPRE se ve, pase lo que pase con los atributos, asi
+        /// que un codo insertado con el bloque de tramo recto dejaria el "x" (y, si
+        /// ATTDISP esta en Activado, tambien los numeros) visibles en el dibujo pese
+        /// a forceInvisible-. En circular no hace falta -su bloque de tramo recto ya
+        /// no tiene ninguna geometria fija-, asi que reutiliza el mismo.</summary>
+        public static ObjectId EnsureCodoLabelBlock(Transaction tr, Database db, string tipo)
+        {
+            if (tipo == "Circular") return EnsureLabelBlock(tr, db, tipo);
+
+            string name = "CVENT_ROTULO_RECT_CODO";
+            BlockTableRecord btr = GetOrCreateEmptyBlock(tr, db, name);
+            if (btr == null) return ExistingId(tr, db, name);
+
+            const double lineH = 1.0;
+            const double lineGap = 1.4;
+            AddAttDef(tr, btr, "ANCHO", "Ancho", new Point2d(0, 0), lineH, "0", true);
+            AddAttDef(tr, btr, "ALTO", "Alto", new Point2d(0, -lineGap), lineH, "0", true);
+            AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0, -2.0 * lineGap), lineH, "0", true);
 
             return btr.ObjectId;
         }
@@ -458,7 +437,7 @@ namespace ConductosPlugin
             double rot = GeometryUtil.VectorAngle(dir);
             if (Math.Abs(rot) > Math.PI / 2.0) rot = GeometryUtil.NormPi(rot + Math.PI);
 
-            ObjectId id = EnsureLabelBlock(tr, db, tipo);
+            ObjectId id = forceInvisible ? EnsureCodoLabelBlock(tr, db, tipo) : EnsureLabelBlock(tr, db, tipo);
             var br = new BlockReference(new Point3d(pos.X, pos.Y, 0), id)
             {
                 Rotation = rot,
@@ -522,26 +501,6 @@ namespace ConductosPlugin
             // invertiria tambien la direccion de entrada 180 grados (el vector local
             // (1,0) pasaria a (-1,0) tras el reflejo), dejando el codo insertado al
             // reves respecto al tramo recto que lo precede.
-            double yScale = turnAngleDeg < 0.0 ? -scaleF : scaleF;
-            var br = new BlockReference(new Point3d(t1.X, t1.Y, 0), id)
-            {
-                Rotation = dirInAngle,
-                ScaleFactors = new Scale3d(scaleF, yScale, 1.0),
-                Layer = CventConfig.WallLayer,
-            };
-            owner.AppendEntity(br);
-            tr.AddNewlyCreatedDBObject(br, true);
-            return br;
-        }
-
-        /// <summary>Version rectangular de InsertElbow: mismo mecanismo de escala
-        /// uniforme + reflejo en Y para un giro a la derecha, pero usando
-        /// EnsureElbowBlockRectangular (tres lineas rectas a bisel, no arcos) y
-        /// escalando al ancho real en vez de al diametro real.</summary>
-        public static BlockReference InsertElbowRectangular(Transaction tr, Database db, BlockTableRecord owner, Point2d t1, double dirInAngle, double turnAngleDeg, double ancho)
-        {
-            ObjectId id = EnsureElbowBlockRectangular(tr, db, Math.Abs(turnAngleDeg));
-            double scaleF = ancho / CventConfig.ElbowReferenceDiameter;
             double yScale = turnAngleDeg < 0.0 ? -scaleF : scaleF;
             var br = new BlockReference(new Point3d(t1.X, t1.Y, 0), id)
             {
@@ -729,14 +688,15 @@ namespace ConductosPlugin
             br.ScaleFactors = new Scale3d(newLength, br.ScaleFactors.Y, br.ScaleFactors.Z);
         }
 
-        /// <summary>Codo entre el final de la pieza pendiente y el inicio de la pieza
-        /// siguiente, dado el giro turnAngle (radianes, con signo: + = izquierda, - =
-        /// derecha) en el vertice compartido. Remata la pieza pendiente en el punto
-        /// de tangencia de entrada, dibuja el codo -curvo (bloque de 3 arcos) en
-        /// circular, a inglete/bisel (bloque de 3 lineas rectas) en rectangular,
-        /// segun oldPending.Tipo- y las dos marcas perpendiculares de inicio/fin.
-        /// Devuelve la pieza siguiente, arrancando en el punto de tangencia de
-        /// salida.</summary>
+        /// <summary>Codo CURVO circular entre el final de la pieza pendiente y el
+        /// inicio de la pieza siguiente, dado el giro turnAngle (radianes, con
+        /// signo: + = izquierda, - = derecha) en el vertice compartido. Solo se
+        /// llama para conductos circulares -un codo rectangular real es un miter
+        /// recto sin radio, resuelto directamente por ProcessNextPiece, vease
+        /// DuctRunner.TraceDuctRun-. Remata la pieza pendiente en el punto de
+        /// tangencia de entrada, dibuja el codo (bloque de 3 arcos concentricos) y
+        /// las dos marcas perpendiculares de inicio/fin. Devuelve la pieza
+        /// siguiente, arrancando en el punto de tangencia de salida.</summary>
         public static PendingPiece ProcessElbow(Transaction tr, Database db, BlockTableRecord ms, PendingPiece oldPending, Point2d vertexPt, Point2d newEndPt, double turnAngle)
         {
             Vector2d dirIn = oldPending.Dir;
@@ -780,11 +740,8 @@ namespace ConductosPlugin
                 oldPending.CenterStart.GetDistanceTo(t1), oldPending.TextHeight, oldPending.LabelOffset, oldPending.LabelRepeat, oldPending.Tipo);
             DrawingUtil.DrawLine(tr, ms, t1L, t1R, CventConfig.WallLayer); // marca perpendicular: inicio del codo
 
-            // --- el codo en si: bloque curvo (circular) o bloque a bisel (rectangular) ---
-            if (oldPending.Tipo == "Circular")
-                BlockFactory.InsertElbow(tr, db, ms, t1, GeometryUtil.VectorAngle(dirIn), GeometryUtil.Rtd(turnAngle), 2.0 * radius);
-            else
-                BlockFactory.InsertElbowRectangular(tr, db, ms, t1, GeometryUtil.VectorAngle(dirIn), GeometryUtil.Rtd(turnAngle), 2.0 * radius);
+            // --- el codo en si: bloque curvo ---
+            BlockFactory.InsertElbow(tr, db, ms, t1, GeometryUtil.VectorAngle(dirIn), GeometryUtil.Rtd(turnAngle), 2.0 * radius);
 
             // --- marca perpendicular: fin del codo ---
             Point2d t2L = GeometryUtil.OffsetPoint(t2, dirOut, radius);
@@ -884,16 +841,18 @@ namespace ConductosPlugin
     {
         public static void TraceDuctRun(Database db, Editor ed, string tipo, double diam, double alto, double textHeight, double labelOffset, double labelRepeat, Point2d p0, PendingPiece pending, Vector2d? lastDir, bool restrictAngles, string cmdTag)
         {
-            // Circular: bloques para tramo/reduccion/codo, todos generados por
-            // BlockFactory. Rectangular: sin bloques de PARED (una pared a inglete no
-            // se puede representar estirando en X un bloque de extremos siempre
-            // perpendiculares) pero SI de codo -ProcessElbow inserta, segun
-            // oldPending.Tipo, el bloque curvo circular o el bloque a bisel
-            // rectangular, ambos delimitados por las mismas marcas perpendiculares de
-            // inicio/fin y con los mismos angulos normalizados-. El rotulo de cada
-            // tramo (bloque CVENT_ROTULO_CIRC/RECT, con sus atributos
-            // ANCHO/ALTO/LARGO) se inserta siempre, aparte de las paredes -bloque o
-            // lineas sueltas, segun el tipo-, al cerrar cada pieza.
+            // Circular: bloques para tramo/reduccion/codo (todos generados por
+            // BlockFactory), con codos CURVOS via ProcessElbow. Rectangular: sin
+            // bloques de pared (una pared a inglete no se puede representar
+            // estirando en X un bloque de extremos siempre perpendiculares) y SIN
+            // bloque de codo tampoco -un codo rectangular real es un simple miter
+            // recto, sin radio: las paredes de cada tramo se cortan en su
+            // interseccion exacta, que ProcessNextPiece ya calcula para cualquier
+            // angulo, mas abajo, al cerrar cada pieza-. El rotulo de cada tramo
+            // (bloque CVENT_ROTULO_CIRC/RECT, con sus atributos ANCHO/ALTO/LARGO) se
+            // inserta siempre, aparte de las paredes, al cerrar cada pieza; los
+            // angulos normalizados (multiplos de 15, hasta 90) son los mismos en
+            // ambos tipos.
             bool useBlocks = tipo == "Circular";
             double angleStep = CventConfig.AngleStepCircular;
             string dimKeyword = tipo == "Circular" ? "Diametro" : "Ancho";
@@ -974,8 +933,21 @@ namespace ConductosPlugin
                     Point2d effectiveStart = p0;
                     if (pending != null && Math.Abs(GeometryUtil.Rtd(turnAngle)) > CventConfig.AngleEpsilonDeg)
                     {
-                        pending = DuctTracer.ProcessElbow(tr, db, ms, pending, p0, pt, turnAngle);
-                        effectiveStart = pending.CenterStart;
+                        if (tipo == "Circular")
+                        {
+                            pending = DuctTracer.ProcessElbow(tr, db, ms, pending, p0, pt, turnAngle);
+                            effectiveStart = pending.CenterStart;
+                        }
+                        else
+                        {
+                            // Rectangular: un codo real es un miter recto -sin radio,
+                            // sin bisel, sin zona delimitada-: las paredes de cada
+                            // tramo simplemente se cortan en su interseccion exacta,
+                            // que ProcessNextPiece ya calcula (mas abajo, al cerrar
+                            // esta pieza) para cualquier angulo. Aqui solo se deja su
+                            // seccion consultable en Propiedades -nunca dibujada-.
+                            BlockFactory.InsertLabel(tr, db, ms, p0, pt, diam, alto, 0.0, textHeight, labelOffset, tipo, forceInvisible: true);
+                        }
                         elbowCount++;
                     }
 
