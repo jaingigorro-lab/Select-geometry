@@ -23,10 +23,13 @@ que se acoplan a un conducto ya existente.
     bloque de extremos siempre perpendiculares. Cada tramo lleva un rótulo de
     texto "AnchoxAlto".
 
-  Cada tramo (circular o rectangular) lleva su rótulo de tamaño como texto
-  **suelto** — nunca un atributo de bloque — así su altura queda editable
-  libremente en el panel de Propiedades, sin que nada la reajuste después
-  (ver más abajo por qué se descartó el atributo de bloque).
+  Al principio también se pregunta la **altura de texto** de los rótulos —
+  la eliges tú, según la escala de dibujo que vayas a usar. Cada tramo
+  (circular o rectangular) lleva un rótulo con sus atributos ANCHO (`⌀200` en
+  circular), ALTO (solo rectangular) y LARGO, como bloque **vinculado**
+  (`CVENT_ROTULO_CIRC`/`CVENT_ROTULO_RECT`) — así queda disponible para
+  mediciones/extracción de cantidades (`DATAEXTRACTION`, `BATTMAN`), no es
+  solo texto suelto (ver más abajo por qué es un bloque aparte).
 
   Se puede desactivar la restricción de ángulo sobre la marcha con la palabra
   clave `Libre`. Con `Diametro` (circular) o `Ancho` (rectangular, que
@@ -61,16 +64,20 @@ de `ConductosPlugin.cs`) y los reutiliza después:
   concéntricos (pared interior, eje, pared exterior); se inserta escalado
   uniformemente al diámetro real, y reflejado (`ScaleFactors.Y` negativo, ver
   más abajo por qué Y y no X) para un giro a la derecha.
+- `CVENT_ROTULO_CIRC` / `CVENT_ROTULO_RECT` — el rótulo de cada tramo (ver
+  siguiente sección), con sus atributos ANCHO/ALTO/LARGO.
 
-Solo el tipo **circular** usa bloques (`DuctRunner.TraceDuctRun` decide
-`useBlocks = tipo == "Circular"`). El tipo **rectangular** siempre dibuja con
-líneas sueltas: sus esquinas a inglete se resuelven con el mismo cierre a
-inglete (`ProcessNextPiece`) que ya usan las reducciones y transiciones,
-simplemente sin pasar por `ProcessElbow` — no hace falta ninguna geometría de
-codo aparte, la intersección de las dos paredes ya da el vértice exacto a
-cualquier ángulo.
+Solo el tipo **circular** usa bloques **para las paredes**
+(`DuctRunner.TraceDuctRun` decide `useBlocks = tipo == "Circular"`). El tipo
+**rectangular** siempre dibuja las paredes con líneas sueltas: sus esquinas a
+inglete se resuelven con el mismo cierre a inglete (`ProcessNextPiece`) que ya
+usan las reducciones y transiciones, simplemente sin pasar por `ProcessElbow`
+— no hace falta ninguna geometría de codo aparte, la intersección de las dos
+paredes ya da el vértice exacto a cualquier ángulo. El rótulo, en cambio,
+**siempre** es un bloque (`CVENT_ROTULO_*`), tanto en circular como en
+rectangular — ver por qué a continuación.
 
-### Por qué el rótulo de tamaño es texto suelto, no un atributo de bloque
+### Por qué el rótulo es un bloque APARTE, no un atributo del tramo recto
 
 Los bloques de tramo recto/reducción se insertan con `ScaleFactors` **no
 uniforme** (X = longitud real, Y = 1 fijo). Un atributo definido dentro de ese
@@ -79,17 +86,24 @@ bloque se coloca bien en `Position`/`Rotation`
 transformación), pero **no** `Height`/`WidthFactor` — salía un texto con una
 altura disparatada (proporcional a la longitud del tramo, no al diámetro), que
 de lejos parecía una mancha y, al hacer zoom, "desaparecía" porque la vista
-quedaba dentro de una letra gigante. Fijar `Height` a mano tras cada
-`SetAttributeFromBlock` arregló el tamaño, pero cada vez que el bloque se
-recortaba (`AdjustBodyLength`, cuando el tramo resulta preceder a un codo) había
-que volver a corregirlo — frágil, y el usuario no podía simplemente editar la
-altura una vez y dejarla así, porque el siguiente recorte la volvía a pisar.
+quedaba dentro de una letra gigante.
 
-La solución fue quitar el atributo por completo: `DrawingUtil.DrawSizeLabel`
-dibuja el rótulo ("⌀200" en circular, "400x200" en rectangular) como un
-`DBText` **suelto**, ajeno al bloque y a su `ScaleFactors`. Su `Height` es una
-propiedad normal que el usuario puede cambiar desde Propiedades cuando quiera,
-para cualquier escala, sin que ningún recorte posterior la vuelva a tocar.
+Fijar `Height` a mano tras cada `SetAttributeFromBlock` arreglaba el tamaño,
+pero era frágil (había que repetirlo cada vez que `AdjustBodyLength` recortaba
+el bloque) y, más importante: el usuario necesitaba que el rótulo siguiera
+siendo un **atributo real** (vinculado al bloque, extraíble con
+`DATAEXTRACTION`/`BATTMAN` para mediciones de sección y longitud), así que
+pasarlo a texto suelto tampoco servía.
+
+La solución fue separar el rótulo en su **propio bloque** (`BlockFactory.
+EnsureLabelBlock`/`InsertLabel`), sin ninguna otra geometría, insertado
+siempre con `ScaleFactors` **uniforme** (`X = Y = alturaTexto`, la altura que
+el usuario elige al principio de CVENT/CVENTT). Al ser uniforme,
+`SetAttributeFromBlock` calcula bien `Height`/`WidthFactor` sin ningún ajuste
+a mano — el mismo mecanismo que ya usaba, sin problemas, el bloque de codo.
+Como es un bloque independiente de las paredes, funciona igual en circular
+(paredes en bloque) y en rectangular (paredes en líneas sueltas): el rótulo
+siempre queda vinculado, y su tamaño siempre sale bien calculado.
 
 ## Corrección respecto al LSP original
 
