@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Globalization;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Colors;
@@ -154,11 +153,13 @@ namespace ConductosPlugin
             return arc;
         }
 
-        /// <summary>Etiqueta "AnchoxAlto" para un tramo rectangular (no usa bloques ni
-        /// atributos -los tramos rectangulares se dibujan con lineas sueltas, ver
-        /// DuctTracer-): texto suelto centrado sobre el punto medio del tramo,
-        /// desplazado por fuera de la pared, con la altura proporcional al ancho.</summary>
-        public static void DrawRectLabel(Transaction tr, BlockTableRecord owner, Point2d start, Point2d end, double ancho, double alto)
+        /// <summary>Rotulo de tamano para un tramo (circular o rectangular): texto
+        /// SUELTO -nunca un atributo de bloque-, centrado sobre el punto medio del
+        /// tramo y desplazado por fuera de la pared, con la altura proporcional al
+        /// ancho. Al ser una entidad independiente (no dentro de un bloque con
+        /// escala no uniforme), su Height queda editable libremente por el usuario
+        /// despues sin que nada la reajuste.</summary>
+        public static void DrawSizeLabel(Transaction tr, BlockTableRecord owner, Point2d start, Point2d end, double ancho, string label)
         {
             Vector2d dir = GeometryUtil.UnitVector(start, end);
             Vector2d perp = GeometryUtil.LeftNormal(dir);
@@ -171,7 +172,7 @@ namespace ConductosPlugin
                 Position = new Point3d(pos.X, pos.Y, 0),
                 Height = h,
                 Rotation = GeometryUtil.VectorAngle(dir),
-                TextString = $"{ancho:0}x{alto:0}",
+                TextString = label,
                 Layer = CventConfig.WallLayer,
             };
             owner.AppendEntity(text);
@@ -226,13 +227,14 @@ namespace ConductosPlugin
 
         /// <summary>Tramo recto de longitud UNIDAD (1): dos lineas paralelas de (0,+-r)
         /// a (1,+-r) en la capa "0" (para heredar la capa de la insercion). Al
-        /// insertarse se estira en X = longitud real. Incluye una definicion de
-        /// atributo, ANCHO ("%%C<diametro>", el simbolo de diametro de AutoCAD), con
-        /// posicion/altura en coordenadas LOCALES proporcionales al diametro (fijo
-        /// por definicion de bloque, asi que no hace falta reposicionarla por
-        /// instancia): como el eje Y del bloque nunca se escala (solo X, al estirar
-        /// la longitud), esa geometria local sale correcta en cualquier instancia sin
-        /// tocarla, y el valor tampoco varia entre instancias (mismo diametro).</summary>
+        /// insertarse se estira en X = longitud real. Sin atributos -el rotulo de
+        /// ancho/diametro de cada instancia se dibuja aparte, como texto suelto
+        /// independiente del bloque (DrawingUtil.DrawSizeLabel, llamado desde
+        /// DuctTracer): un atributo dentro de un bloque con escala NO uniforme (aqui
+        /// X=longitud, Y=1 fijo) requiere corregir Height/WidthFactor a mano cada vez
+        /// que se toca la escala (SetAttributeFromBlock no lo calcula bien), y un
+        /// texto suelto sale bien sin ese cuidado y su altura queda editable
+        /// libremente por el usuario despues, sin que nada la vuelva a tocar.</summary>
         public static ObjectId EnsureStraightBlock(Transaction tr, Database db, double diameter)
         {
             string name = StraightBlockName(diameter);
@@ -243,80 +245,7 @@ namespace ConductosPlugin
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, r), new Point2d(1, r), "0");
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, -r), new Point2d(1, -r), "0");
 
-            double h = Math.Max(diameter * 0.2, 1.0);
-            AddAttDef(tr, btr, "ANCHO", "Diametro", new Point2d(0.5, r + h * 1.0), h, "%%C" + diameter.ToString("0"));
-
             return btr.ObjectId;
-        }
-
-        private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos, double height, string defaultValue)
-        {
-            var attDef = new AttributeDefinition
-            {
-                Position = new Point3d(pos.X, pos.Y, 0),
-                Height = height,
-                Tag = tag,
-                Prompt = prompt,
-                TextString = defaultValue,
-                Justify = AttachmentPoint.BaseLeft,
-                Layer = "0",
-            };
-            btr.AppendEntity(attDef);
-            tr.AddNewlyCreatedDBObject(attDef, true);
-        }
-
-        /// <summary>Crea las AttributeReference de un bloque recien insertado, una por
-        /// cada AttributeDefinition no constante de su definicion (br debe estar ya
-        /// insertado y con BlockTransform valido).</summary>
-        private static void PopulateAttributes(Transaction tr, BlockReference br, ObjectId blockDefId, double diameter)
-        {
-            double h = Math.Max(diameter * 0.2, 1.0);
-            var btr = (BlockTableRecord)tr.GetObject(blockDefId, OpenMode.ForRead);
-            foreach (ObjectId defId in btr)
-            {
-                var defEnt = tr.GetObject(defId, OpenMode.ForRead);
-                if (defEnt is AttributeDefinition attDef && !attDef.Constant)
-                {
-                    var attRef = new AttributeReference();
-                    attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
-                    // SetAttributeFromBlock no calcula bien Height/WidthFactor cuando
-                    // el bloque tiene escala NO uniforme (aqui X=longitud del tramo,
-                    // Y=1 fijo) -sale un texto gigantesco, proporcional a la
-                    // longitud-. Se fija a mano, proporcional al diametro (fijo por
-                    // bloque, no al ScaleFactors de esta instancia).
-                    attRef.Height = h;
-                    attRef.WidthFactor = 1.0;
-                    attRef.TextString = attDef.TextString;
-                    br.AttributeCollection.AppendAttribute(attRef);
-                    tr.AddNewlyCreatedDBObject(attRef, true);
-                }
-            }
-        }
-
-        /// <summary>Tras cambiar el ScaleFactors.X de un BlockReference (tramo recto
-        /// recortado porque el vertice de salida resulto ser un codo), recalcula la
-        /// posicion de sus atributos a partir del nuevo BlockTransform (el valor de
-        /// ANCHO no cambia, es fijo por bloque, pero la POSICION si depende de la
-        /// longitud -esta en el punto medio local, 0.5-).</summary>
-        public static void ResyncAttributesAfterRescale(Transaction tr, BlockReference br, double diameter)
-        {
-            double h = Math.Max(diameter * 0.2, 1.0);
-            var btr = (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
-            var defsByTag = new Dictionary<string, AttributeDefinition>(StringComparer.OrdinalIgnoreCase);
-            foreach (ObjectId defId in btr)
-            {
-                var defEnt = tr.GetObject(defId, OpenMode.ForRead);
-                if (defEnt is AttributeDefinition attDef && !attDef.Constant) defsByTag[attDef.Tag] = attDef;
-            }
-
-            foreach (ObjectId attId in br.AttributeCollection)
-            {
-                var attRef = (AttributeReference)tr.GetObject(attId, OpenMode.ForWrite);
-                if (defsByTag.TryGetValue(attRef.Tag, out AttributeDefinition attDef))
-                    attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
-                attRef.Height = h;
-                attRef.WidthFactor = 1.0;
-            }
         }
 
         /// <summary>Reduccion de longitud UNIDAD (1): radio r1 en x=0 a radio r2 en
@@ -377,8 +306,6 @@ namespace ConductosPlugin
             };
             owner.AppendEntity(br);
             tr.AddNewlyCreatedDBObject(br, true);
-
-            PopulateAttributes(tr, br, id, diameter);
             return br;
         }
 
@@ -458,10 +385,12 @@ namespace ConductosPlugin
         /// recalcular su longitud en AdjustBodyLength-.</summary>
         public Point2d BodyStartPt;
 
-        /// <summary>Alto (solo conductos rectangulares; 0 en circular). No influye en
-        /// la geometria en planta -Radius*2 ya hace de "ancho" para ambos tipos-,
-        /// solo se usa para rotular esta pieza como "AnchoxAlto" (DrawRectLabel).</summary>
-        public double Alto;
+        /// <summary>Texto del rotulo de esta pieza ("%%C200" en circular, "400x200"
+        /// en rectangular), o null si no lleva rotulo. Se dibuja como texto suelto,
+        /// independiente del bloque, al cerrar la pieza (ProcessNextPiece,
+        /// ProcessElbow o FlushPending) -asi su altura queda libremente editable
+        /// despues, sin que nada la reajuste.</summary>
+        public string SizeLabel;
     }
 
     /// <summary>
@@ -494,8 +423,8 @@ namespace ConductosPlugin
                 DrawingUtil.DrawLine(tr, ms, oldPending.CenterStart, startPt, CventConfig.AxisLayer);
                 if (!GeometryUtil.DirsParallel(oldPending.LeftDir, leftDir))
                     DrawingUtil.DrawLine(tr, ms, jointL, jointR, CventConfig.WallLayer);
-                if (oldPending.Alto > 0)
-                    DrawingUtil.DrawRectLabel(tr, ms, oldPending.CenterStart, startPt, oldPending.Radius * 2.0, oldPending.Alto);
+                if (!string.IsNullOrEmpty(oldPending.SizeLabel))
+                    DrawingUtil.DrawSizeLabel(tr, ms, oldPending.CenterStart, startPt, oldPending.Radius * 2.0, oldPending.SizeLabel);
 
                 finalStartL = jointL;
                 finalStartR = jointR;
@@ -528,7 +457,7 @@ namespace ConductosPlugin
         /// Devuelve el nuevo estado pendiente, marcado WallsAlreadyDrawn si esta
         /// pieza se dibujo como bloque (sus paredes no haran falta dibujarlas de
         /// nuevo al cerrar la union con la siguiente).</summary>
-        public static PendingPiece DrawPiece(Transaction tr, Database db, BlockTableRecord ms, PendingPiece oldPending, Point2d startPt, Point2d endPt, double startRadius, double endRadius, bool useBlocks, double alto = 0.0)
+        public static PendingPiece DrawPiece(Transaction tr, Database db, BlockTableRecord ms, PendingPiece oldPending, Point2d startPt, Point2d endPt, double startRadius, double endRadius, bool useBlocks, string sizeLabel = null)
         {
             bool drewBlock = false;
             ObjectId bodyId = ObjectId.Null;
@@ -548,7 +477,7 @@ namespace ConductosPlugin
             pending.WallsAlreadyDrawn = drewBlock;
             pending.BodyBlockId = bodyId;
             pending.BodyStartPt = startPt;
-            pending.Alto = alto;
+            pending.SizeLabel = sizeLabel;
             return pending;
         }
 
@@ -557,8 +486,10 @@ namespace ConductosPlugin
         /// vertice bruto con el que se inserto la primera vez (el bloque se inserta
         /// al hacer clic en el punto, antes de saber si ese punto se convertira en un
         /// codo; solo entonces, aqui, se sabe el punto de tangencia real donde debe
-        /// terminar). Tambien actualiza sus atributos ANCHO/LARGO -si los tiene- a la
-        /// longitud recortada. No hace nada si "piece" no se dibujo como bloque.</summary>
+        /// terminar). El rotulo de esta pieza (si tiene) se dibuja aparte, como texto
+        /// suelto, cuando se cierra la pieza -no antes-, asi que no hace falta
+        /// reajustar nada mas aqui. No hace nada si "piece" no se dibujo como
+        /// bloque.</summary>
         private static void AdjustBodyLength(Transaction tr, PendingPiece piece, Point2d newEndPt)
         {
             if (!piece.WallsAlreadyDrawn || piece.BodyBlockId.IsNull) return;
@@ -567,8 +498,6 @@ namespace ConductosPlugin
             double newLength = piece.BodyStartPt.GetDistanceTo(newEndPt);
             if (newLength < 1e-6) newLength = 1e-6;
             br.ScaleFactors = new Scale3d(newLength, br.ScaleFactors.Y, br.ScaleFactors.Z);
-
-            BlockFactory.ResyncAttributesAfterRescale(tr, br, piece.Radius * 2.0);
         }
 
         /// <summary>Codo curvo entre el final de la pieza pendiente y el inicio de la
@@ -629,6 +558,8 @@ namespace ConductosPlugin
                 AdjustBodyLength(tr, oldPending, t1);
             }
             DrawingUtil.DrawLine(tr, ms, oldPending.CenterStart, t1, CventConfig.AxisLayer);
+            if (!string.IsNullOrEmpty(oldPending.SizeLabel))
+                DrawingUtil.DrawSizeLabel(tr, ms, oldPending.CenterStart, t1, oldPending.Radius * 2.0, oldPending.SizeLabel);
             DrawingUtil.DrawLine(tr, ms, t1L, t1R, CventConfig.WallLayer); // marca perpendicular: inicio del codo
 
             // --- el codo en si: como bloque si useBlocks, o como tres arcos sueltos ---
@@ -682,8 +613,8 @@ namespace ConductosPlugin
                 DrawingUtil.DrawLine(tr, ms, pending.FinalStartR, pending.NaiveEndR, CventConfig.WallLayer);
             }
             DrawingUtil.DrawLine(tr, ms, pending.CenterStart, pending.CenterEnd, CventConfig.AxisLayer);
-            if (pending.Alto > 0)
-                DrawingUtil.DrawRectLabel(tr, ms, pending.CenterStart, pending.CenterEnd, pending.Radius * 2.0, pending.Alto);
+            if (!string.IsNullOrEmpty(pending.SizeLabel))
+                DrawingUtil.DrawSizeLabel(tr, ms, pending.CenterStart, pending.CenterEnd, pending.Radius * 2.0, pending.SizeLabel);
         }
 
         /// <summary>Calcula el punto siguiente ajustado (si restrictMode y hay una
@@ -741,6 +672,7 @@ namespace ConductosPlugin
             bool useBlocks = tipo == "Circular";
             double angleStep = tipo == "Circular" ? CventConfig.AngleStepCircular : CventConfig.AngleStepRectangular;
             string dimKeyword = tipo == "Circular" ? "Diametro" : "Ancho";
+            string SizeLabel(double ancho, double altoVal) => tipo == "Circular" ? "%%C" + ancho.ToString("0") : $"{ancho:0}x{altoVal:0}";
 
             double? pendDiam = null;
             double pendAlto = alto;
@@ -837,12 +769,12 @@ namespace ConductosPlugin
                             CventConfig.TransitionMinFactor * Math.Min(diam, pendDiam.Value)));
                         Point2d pMid = new Point2d(effectiveStart.X + dirv.X * transLen, effectiveStart.Y + dirv.Y * transLen);
 
-                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pMid, diam / 2.0, pendDiam.Value / 2.0, useBlocks, alto);
+                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pMid, diam / 2.0, pendDiam.Value / 2.0, useBlocks, SizeLabel(diam, alto));
                         redCount++;
 
                         if (pMid.GetDistanceTo(pt) > 1e-6)
                         {
-                            pending = DuctTracer.DrawPiece(tr, db, ms, pending, pMid, pt, pendDiam.Value / 2.0, pendDiam.Value / 2.0, useBlocks, pendAlto);
+                            pending = DuctTracer.DrawPiece(tr, db, ms, pending, pMid, pt, pendDiam.Value / 2.0, pendDiam.Value / 2.0, useBlocks, SizeLabel(pendDiam.Value, pendAlto));
                             segCount++;
                         }
                         diam = pendDiam.Value;
@@ -851,7 +783,7 @@ namespace ConductosPlugin
                     }
                     else
                     {
-                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pt, diam / 2.0, diam / 2.0, useBlocks, alto);
+                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pt, diam / 2.0, diam / 2.0, useBlocks, SizeLabel(diam, alto));
                         segCount++;
                     }
 

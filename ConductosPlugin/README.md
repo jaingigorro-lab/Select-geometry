@@ -20,8 +20,13 @@ que se acoplan a un conducto ya existente.
   - **Rectangular**: pide ancho y alto; solo se admiten giros a 90°, resueltos
     como esquina **a inglete** (sin curva) — no usa bloques para las paredes,
     ya que un extremo cortado en ángulo no se puede representar estirando un
-    bloque de extremos siempre perpendiculares. Cada tramo lleva una etiqueta
-    de texto "AnchoxAlto".
+    bloque de extremos siempre perpendiculares. Cada tramo lleva un rótulo de
+    texto "AnchoxAlto".
+
+  Cada tramo (circular o rectangular) lleva su rótulo de tamaño como texto
+  **suelto** — nunca un atributo de bloque — así su altura queda editable
+  libremente en el panel de Propiedades, sin que nada la reajuste después
+  (ver más abajo por qué se descartó el atributo de bloque).
 
   Se puede desactivar la restricción de ángulo sobre la marcha con la palabra
   clave `Libre`. Con `Diametro` (circular) o `Ancho` (rectangular, que
@@ -50,9 +55,7 @@ de `ConductosPlugin.cs`) y los reutiliza después:
 
 - `CVENT_TRAMO_RECTO_D<diámetro>` y `CVENT_REDUCCION_D<d1>_D<d2>` — un cuerpo de
   longitud **unidad** (1) que se estira en X (`ScaleFactors`) a la longitud real
-  de cada tramo al insertarse. El tramo recto incluye un atributo `ANCHO` con
-  el símbolo de diámetro (`%%C200`), en una posición local proporcional al
-  diámetro (no cambia entre instancias, ya que cada bloque es por diámetro).
+  de cada tramo al insertarse. Sin atributos (ver más abajo por qué).
 - `CVENT_CODO_A<ángulo>` — un único bloque por ángulo normalizado (15/30/45/
   60/75/90), construido a un diámetro de referencia (100) con tres arcos
   concéntricos (pared interior, eje, pared exterior); se inserta escalado
@@ -65,21 +68,28 @@ líneas sueltas: sus esquinas a inglete se resuelven con el mismo cierre a
 inglete (`ProcessNextPiece`) que ya usan las reducciones y transiciones,
 simplemente sin pasar por `ProcessElbow` — no hace falta ninguna geometría de
 codo aparte, la intersección de las dos paredes ya da el vértice exacto a
-cualquier ángulo. Como no hay bloque, el ancho×alto de cada tramo rectangular
-se rotula con un `DBText` suelto (`DrawingUtil.DrawRectLabel`), no con un
-atributo.
+cualquier ángulo.
 
-### Cuidado con la escala no uniforme en los atributos
+### Por qué el rótulo de tamaño es texto suelto, no un atributo de bloque
 
 Los bloques de tramo recto/reducción se insertan con `ScaleFactors` **no
-uniforme** (X = longitud real, Y = 1 fijo). `AttributeReference.SetAttributeFromBlock`
-calcula bien `Position`/`Rotation` bajo esa transformación, pero **no**
-`Height`/`WidthFactor` — sale un texto con una altura disparatada (proporcional
-a la longitud, no al diámetro), que de lejos parece una mancha y, al hacer
-zoom, "desaparece" porque estás dentro de una letra gigante. `BlockFactory`
-fija `Height`/`WidthFactor` a mano tras cada `SetAttributeFromBlock`
-(`PopulateAttributes`, `ResyncAttributesAfterRescale`), usando el diámetro
-(fijo por bloque) en vez del `ScaleFactors` de la instancia.
+uniforme** (X = longitud real, Y = 1 fijo). Un atributo definido dentro de ese
+bloque se coloca bien en `Position`/`Rotation`
+(`AttributeReference.SetAttributeFromBlock` calcula eso correctamente bajo esa
+transformación), pero **no** `Height`/`WidthFactor` — salía un texto con una
+altura disparatada (proporcional a la longitud del tramo, no al diámetro), que
+de lejos parecía una mancha y, al hacer zoom, "desaparecía" porque la vista
+quedaba dentro de una letra gigante. Fijar `Height` a mano tras cada
+`SetAttributeFromBlock` arregló el tamaño, pero cada vez que el bloque se
+recortaba (`AdjustBodyLength`, cuando el tramo resulta preceder a un codo) había
+que volver a corregirlo — frágil, y el usuario no podía simplemente editar la
+altura una vez y dejarla así, porque el siguiente recorte la volvía a pisar.
+
+La solución fue quitar el atributo por completo: `DrawingUtil.DrawSizeLabel`
+dibuja el rótulo ("⌀200" en circular, "400x200" en rectangular) como un
+`DBText` **suelto**, ajeno al bloque y a su `ScaleFactors`. Su `Height` es una
+propiedad normal que el usuario puede cambiar desde Propiedades cuando quiera,
+para cualquier escala, sin que ningún recorte posterior la vuelva a tocar.
 
 ## Corrección respecto al LSP original
 
