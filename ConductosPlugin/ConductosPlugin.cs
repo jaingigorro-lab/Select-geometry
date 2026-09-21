@@ -241,7 +241,11 @@ namespace ConductosPlugin
         /// -para un giro a la derecha se inserta reflejado (XScale negativo); para
         /// otro diametro, escalado uniformemente-. Tres arcos concentricos (pared
         /// interior, eje, pared exterior); origen = punto de tangencia de entrada,
-        /// eje +X = direccion de entrada.
+        /// eje +X = direccion de entrada. Los arcos de pared van EXPLICITAMENTE en
+        /// WallLayer y el de eje en AxisLayer -no en "0"-, porque este bloque se
+        /// inserta con Layer=WallLayer: si los tres arcos fueran "0" (heredando esa
+        /// capa), el arco de eje saldria tambien azul en vez de gris, distinto del
+        /// eje de los tramos rectos (que si es una linea suelta en AxisLayer).
         /// </summary>
         public static ObjectId EnsureElbowBlock(Transaction tr, Database db, double angleDegAbs)
         {
@@ -261,9 +265,9 @@ namespace ConductosPlugin
             double innerRadius = Math.Max(bendRadius - radius, radius * 0.05);
             double outerRadius = bendRadius + radius;
 
-            DrawingUtil.DrawArc(tr, btr, center, innerRadius, angleT1, angleT2, "0");
-            DrawingUtil.DrawArc(tr, btr, center, bendRadius, angleT1, angleT2, "0");
-            DrawingUtil.DrawArc(tr, btr, center, outerRadius, angleT1, angleT2, "0");
+            DrawingUtil.DrawArc(tr, btr, center, innerRadius, angleT1, angleT2, CventConfig.WallLayer);
+            DrawingUtil.DrawArc(tr, btr, center, bendRadius, angleT1, angleT2, CventConfig.AxisLayer);
+            DrawingUtil.DrawArc(tr, btr, center, outerRadius, angleT1, angleT2, CventConfig.WallLayer);
 
             return btr.ObjectId;
         }
@@ -320,24 +324,29 @@ namespace ConductosPlugin
             BlockTableRecord btr = GetOrCreateEmptyBlock(tr, db, name);
             if (btr == null) return ExistingId(tr, db, name);
 
+            // ANCHO/ALTO visibles en el dibujo; LARGO solo se quiere consultable en
+            // Propiedades, no dibujado -Invisible=true en su definicion-. Un codo
+            // fuerza ademas TODOS sus atributos a invisibles al insertar (vease
+            // InsertLabel/forceInvisible), asi que esta visibilidad por defecto solo
+            // afecta a los tramos rectos/reducciones.
             const double lineH = 1.0;
             const double lineGap = 1.4;
             if (tipo == "Circular")
             {
-                AddAttDef(tr, btr, "ANCHO", "Diametro", new Point2d(0, 0), lineH, "%%C0");
-                AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0, -lineGap), lineH, "0");
+                AddAttDef(tr, btr, "ANCHO", "Diametro", new Point2d(0, 0), lineH, "%%C0", false);
+                AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0, -lineGap), lineH, "0", true);
             }
             else
             {
-                AddAttDef(tr, btr, "ANCHO", "Ancho", new Point2d(0, 0), lineH, "0");
-                AddAttDef(tr, btr, "ALTO", "Alto", new Point2d(0, -lineGap), lineH, "0");
-                AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0, -2.0 * lineGap), lineH, "0");
+                AddAttDef(tr, btr, "ANCHO", "Ancho", new Point2d(0, 0), lineH, "0", false);
+                AddAttDef(tr, btr, "ALTO", "Alto", new Point2d(0, -lineGap), lineH, "0", false);
+                AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0, -2.0 * lineGap), lineH, "0", true);
             }
 
             return btr.ObjectId;
         }
 
-        private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos, double height, string defaultValue)
+        private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos, double height, string defaultValue, bool invisible)
         {
             var attDef = new AttributeDefinition
             {
@@ -348,6 +357,7 @@ namespace ConductosPlugin
                 TextString = defaultValue,
                 Justify = AttachmentPoint.BaseLeft,
                 Layer = "0",
+                Invisible = invisible,
             };
             btr.AppendEntity(attDef);
             tr.AddNewlyCreatedDBObject(attDef, true);
@@ -357,8 +367,12 @@ namespace ConductosPlugin
         /// start-end, desplazado por fuera de la pared, orientado segun la
         /// direccion del tramo) con sus atributos ya rellenos. textHeight es la
         /// altura de texto REAL que se quiera en el dibujo -la elige el usuario al
-        /// principio de CVENT, para la escala que le convenga-.</summary>
-        public static BlockReference InsertLabel(Transaction tr, Database db, BlockTableRecord owner, Point2d start, Point2d end, double ancho, double alto, double largo, double textHeight, string tipo)
+        /// principio de CVENT, para la escala que le convenga-. forceInvisible fuerza
+        /// TODOS los atributos a invisibles en el dibujo (pero consultables en
+        /// Propiedades) sea cual sea su visibilidad por defecto -se usa para el
+        /// rotulo de un codo, donde solo interesa la seccion en Propiedades, nunca
+        /// dibujada-.</summary>
+        public static BlockReference InsertLabel(Transaction tr, Database db, BlockTableRecord owner, Point2d start, Point2d end, double ancho, double alto, double largo, double textHeight, string tipo, bool forceInvisible = false)
         {
             Vector2d dir = GeometryUtil.UnitVector(start, end);
             Vector2d perp = GeometryUtil.LeftNormal(dir);
@@ -384,6 +398,7 @@ namespace ConductosPlugin
                 {
                     var attRef = new AttributeReference();
                     attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
+                    if (forceInvisible) attRef.Invisible = true;
                     if (string.Equals(attDef.Tag, "ANCHO", StringComparison.OrdinalIgnoreCase))
                         attRef.TextString = tipo == "Circular" ? "%%C" + ancho.ToString("0") : ancho.ToString("0");
                     else if (string.Equals(attDef.Tag, "ALTO", StringComparison.OrdinalIgnoreCase))
@@ -663,6 +678,11 @@ namespace ConductosPlugin
             Point2d t2R = GeometryUtil.OffsetPoint(t2, dirOut, -radius);
             DrawingUtil.DrawLine(tr, ms, t2L, t2R, CventConfig.WallLayer);
 
+            // Seccion del codo: solo consultable en Propiedades, nunca dibujada
+            // (forceInvisible) -a diferencia del rotulo de un tramo recto, donde
+            // ANCHO si se ve-.
+            BlockFactory.InsertLabel(tr, db, ms, t1, t2, 2.0 * radius, 0.0, 0.0, oldPending.TextHeight, oldPending.Tipo, forceInvisible: true);
+
             // --- pieza nueva: arranca en el punto de tangencia de salida ---
             Point2d newNaiveEndL = GeometryUtil.OffsetPoint(newEndPt, dirOut, radius);
             Point2d newNaiveEndR = GeometryUtil.OffsetPoint(newEndPt, dirOut, -radius);
@@ -844,6 +864,14 @@ namespace ConductosPlugin
                         {
                             pending = DuctTracer.ProcessElbow(tr, db, ms, pending, p0, pt, turnAngle, useBlocks);
                             effectiveStart = pending.CenterStart;
+                        }
+                        else
+                        {
+                            // Rectangular: el codo en si ya es un simple inglete,
+                            // resuelto mas abajo por ProcessNextPiece (interseccion de
+                            // paredes). Aqui solo se marca su seccion, igual que en
+                            // circular: consultable en Propiedades, nunca dibujada.
+                            BlockFactory.InsertLabel(tr, db, ms, p0, pt, diam, alto, 0.0, textHeight, tipo, forceInvisible: true);
                         }
                         elbowCount++;
                     }
