@@ -162,7 +162,10 @@ namespace ConductosPlugin
         /// dependa solo de su propio flag, como se espera.</summary>
         public static void EnsureAttDispNormal()
         {
-            AcApp.SetSystemVariable("ATTDISP", 1);
+            // ATTDISP es de tipo entero de 16 bits (short) a nivel interno: pasar un
+            // int (32 bits) sin mas -aunque el valor "1" sea valido- dispara
+            // eInvalidInput en SetSystemVariable. Hay que forzar el tipo exacto.
+            AcApp.SetSystemVariable("ATTDISP", (short)1);
         }
     }
 
