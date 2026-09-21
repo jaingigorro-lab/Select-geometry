@@ -153,19 +153,21 @@ namespace ConductosPlugin
             return arc;
         }
 
-        /// <summary>Fuerza la variable de sistema ATTDISP a 1 ("Normal"): con
-        /// ATTDISP en 2 ("Activado"), AutoCAD fuerza TODOS los atributos de bloque a
-        /// verse, sea cual sea su propio flag Invisible -incluida la seccion de un
-        /// codo, que este plugin deja siempre invisible (BlockFactory.InsertLabel,
-        /// forceInvisible)-, lo que parece un fallo del plugin sin serlo. CVENT y
-        /// CVENTT llaman a esto al arrancar para que la visibilidad de cada rotulo
-        /// dependa solo de su propio flag, como se espera.</summary>
+        /// <summary>Intenta forzar la variable de sistema ATTDISP a 1 ("Normal"):
+        /// con ATTDISP en 2 ("Activado"), AutoCAD fuerza TODOS los atributos de
+        /// bloque a verse, sea cual sea su propio flag Invisible -incluida la
+        /// seccion de un codo, que este plugin deja siempre invisible
+        /// (BlockFactory.InsertLabel, forceInvisible)-, lo que parece un fallo del
+        /// plugin sin serlo. CVENT y CVENTT llaman a esto al arrancar para que la
+        /// visibilidad de cada rotulo dependa solo de su propio flag, como se
+        /// espera. Es solo una comodidad -si SetSystemVariable falla por lo que sea
+        /// (version de AutoCAD, tipo de dato que no coincide con lo esperado...) no
+        /// debe tirar abajo el comando entero: en el peor caso, queda pendiente de
+        /// revisar a mano con el comando ATTDISP (opcion Normal).</summary>
         public static void EnsureAttDispNormal()
         {
-            // ATTDISP es de tipo entero de 16 bits (short) a nivel interno: pasar un
-            // int (32 bits) sin mas -aunque el valor "1" sea valido- dispara
-            // eInvalidInput en SetSystemVariable. Hay que forzar el tipo exacto.
-            AcApp.SetSystemVariable("ATTDISP", (short)1);
+            try { AcApp.SetSystemVariable("ATTDISP", (short)1); }
+            catch (Autodesk.AutoCAD.Runtime.Exception) { }
         }
     }
 

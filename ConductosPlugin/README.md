@@ -124,15 +124,15 @@ cambiado — de ahí la importancia de reiniciar AutoCAD en cada prueba.
 
 ### Si la sección de un codo sigue apareciendo en el dibujo: revisa ATTDISP
 
-CVENT y CVENTT fuerzan al arrancar la variable de sistema `ATTDISP` a `1`
-("Normal") — si estaba en `2` ("Activado"), AutoCAD muestra **todos** los
-atributos de bloque sin importar su propio flag `Invisible`, incluida la
-sección de un codo (que este plugin deja siempre invisible). Con `ATTDISP` en
-`0` ("Desactivado") pasaría lo contrario: ni siquiera ANCHO/LARGO de un tramo
-recto se verían. Si aun así ves texto donde no debería (p. ej. porque algo en
-el dwg ya había puesto `ATTDISP` en `2` antes de ejecutar el comando, o por
-cualquier otro motivo), comprueba el valor a mano con el comando `ATTDISP`
-(opción `Normal`).
+CVENT y CVENTT intentan forzar al arrancar la variable de sistema `ATTDISP` a
+`1` ("Normal", envuelto en un `try/catch` que nunca deja tirar abajo el
+comando aunque falle) — si estaba en `2` ("Activado"), AutoCAD muestra
+**todos** los atributos de bloque sin importar su propio flag `Invisible`,
+incluida la sección de un codo (que este plugin deja siempre invisible). Con
+`ATTDISP` en `0` ("Desactivado") pasaría lo contrario: ni siquiera
+ANCHO/LARGO de un tramo recto se verían. Si ves texto donde no debería (o si
+`DrawingUtil.EnsureAttDispNormal` no consigue ajustarlo en tu instalación),
+comprueba el valor a mano con el comando `ATTDISP` (opción `Normal`).
 
 ### Por qué el rótulo es un bloque APARTE, no un atributo del tramo recto
 
