@@ -15,25 +15,34 @@ que se acoplan a un conducto ya existente.
 - **CVENT** — traza un conducto nuevo desde cero, punto a punto. Primero
   pregunta el tipo (`Circular`/`Rectangular`):
   - **Circular**: pide el diámetro; cada giro se ajusta al múltiplo de 15° más
-    cercano (hasta 90°), con codos **curvos** (bloque de 3 arcos concéntricos,
-    o arcos sueltos como reserva).
+    cercano (hasta 90°), con codos **curvos** (bloque de 3 arcos concéntricos).
+    En el dibujo solo se ve el diámetro del tramo recto; la sección del propio
+    codo queda solo en Propiedades, nunca dibujada.
   - **Rectangular**: pide ancho y alto; los giros se ajustan al mismo
-    múltiplo de 15° (hasta 90°) que en circular, resueltos siempre como
-    esquina **a inglete** (sin curva) — no usa bloques para las paredes, ya
-    que un extremo cortado en ángulo no se puede representar estirando un
-    bloque de extremos siempre perpendiculares; la intersección de las dos
-    paredes ya da el vértice exacto a cualquier ángulo normalizado, no solo
-    90°. La sección del codo (igual que en circular) queda solo en
-    Propiedades, nunca dibujada. Cada tramo recto lleva un rótulo con
-    atributos ANCHO/ALTO (ancho × alto).
+    múltiplo de 15° (hasta 90°) que en circular, con el mismo criterio de
+    codo **delimitado** que en circular (dos marcas perpendiculares,
+    inicio/fin) pero **a inglete/bisel** en vez de curvo (bloque de 3 líneas
+    rectas en vez de 3 arcos) — un extremo cortado en ángulo no se puede
+    representar estirando un bloque de paredes de extremos siempre
+    perpendiculares, así que solo el codo usa bloque; las paredes de los
+    tramos rectos siguen siendo líneas sueltas. La sección del codo (igual
+    que en circular) queda solo en Propiedades, nunca dibujada. Cada tramo
+    recto lleva un rótulo "ANCHOxLARGO" en una misma fila (el "x" es un
+    separador fijo, no un atributo, para que ANCHO y LARGO se sigan pudiendo
+    extraer como valores numéricos independientes); ALTO tambien queda
+    disponible, pero solo en Propiedades.
 
-  Al principio también se pregunta la **altura de texto** de los rótulos —
-  la eliges tú, según la escala de dibujo que vayas a usar. Cada tramo
+  Al principio también se preguntan la **altura de texto** de los rótulos, la
+  **separación** entre el rótulo y la pared del conducto, y cada cuánto
+  **repetir** el rótulo a lo largo de un mismo tramo recto (0 = uno solo, en
+  el centro — el valor de siempre) — los tres, a tu elección, según la escala
+  de dibujo que vayas a usar y lo largos que sean los tramos. Cada tramo
   (circular o rectangular) lleva un rótulo con sus atributos ANCHO (`⌀200` en
-  circular), ALTO (solo rectangular) y LARGO, como bloque **vinculado**
-  (`CVENT_ROTULO_CIRC`/`CVENT_ROTULO_RECT`) — así queda disponible para
-  mediciones/extracción de cantidades (`DATAEXTRACTION`, `BATTMAN`), no es
-  solo texto suelto (ver más abajo por qué es un bloque aparte).
+  circular), ALTO (solo rectangular, oculto por defecto) y LARGO, como bloque
+  **vinculado** (`CVENT_ROTULO_CIRC`/`CVENT_ROTULO_RECT`) — así queda
+  disponible para mediciones/extracción de cantidades (`DATAEXTRACTION`,
+  `BATTMAN`), no es solo texto suelto (ver más abajo por qué es un bloque
+  aparte).
 
   Se puede desactivar la restricción de ángulo sobre la marcha con la palabra
   clave `Libre`. Con `Diametro` (circular) o `Ancho` (rectangular, que
@@ -53,7 +62,7 @@ Cada codo, cada reducción y cada derivación quedan delimitados con una línea
 perpendicular al conducto que marca dónde empieza y dónde termina esa pieza
 especial. Las paredes de tramos vecinos se unen a inglete en cada vértice.
 
-## Bloques: se generan solos, no hace falta una librería externa (solo circular)
+## Bloques: se generan solos, no hace falta una librería externa
 
 El LSP original necesitaba una librería de bloques (`.dwg`) construida a mano en
 `BEDIT` — AutoLISP no puede crear bloques dinámicos. En C# **no hace falta**: el
@@ -62,24 +71,27 @@ de `ConductosPlugin.cs`) y los reutiliza después:
 
 - `CVENT_TRAMO_RECTO_D<diámetro>` y `CVENT_REDUCCION_D<d1>_D<d2>` — un cuerpo de
   longitud **unidad** (1) que se estira en X (`ScaleFactors`) a la longitud real
-  de cada tramo al insertarse. Sin atributos (ver más abajo por qué).
-- `CVENT_CODO_A<ángulo>` — un único bloque por ángulo normalizado (15/30/45/
-  60/75/90), construido a un diámetro de referencia (100) con tres arcos
-  concéntricos (pared interior, eje, pared exterior); se inserta escalado
-  uniformemente al diámetro real, y reflejado (`ScaleFactors.Y` negativo, ver
-  más abajo por qué Y y no X) para un giro a la derecha.
+  de cada tramo al insertarse. Sin atributos (ver más abajo por qué). Solo
+  existen para conductos **circulares**: el tipo rectangular siempre dibuja
+  las paredes de sus tramos rectos con líneas sueltas (un extremo cortado en
+  ángulo no se puede representar estirando un bloque de extremos siempre
+  perpendiculares), resolviendo sus esquinas con el mismo cierre a inglete
+  (`ProcessNextPiece`) que ya usan las reducciones y transiciones.
+- `CVENT_CODO_A<ángulo>` (circular) / `CVENT_CODO_RECT_A<ángulo>`
+  (rectangular) — un único bloque por ángulo normalizado (15/30/45/60/75/90) y
+  por tipo, construido a un ancho/diámetro de referencia (100); se inserta
+  escalado uniformemente al ancho/diámetro real, y reflejado (`ScaleFactors.Y`
+  negativo, ver más abajo por qué Y y no X) para un giro a la derecha. El
+  circular es curvo (tres arcos concéntricos: pared interior, eje, pared
+  exterior); el rectangular es un inglete a bisel (las mismas tres líneas,
+  pero rectas) — ambos ocupan la misma longitud a lo largo del tramo (según
+  `ElbowRadiusFactor`) y quedan delimitados por las mismas dos marcas
+  perpendiculares de inicio/fin, calculadas y dibujadas por
+  `DuctTracer.ProcessElbow` para los dos tipos por igual.
 - `CVENT_ROTULO_CIRC` / `CVENT_ROTULO_RECT` — el rótulo de cada tramo (ver
-  siguiente sección), con sus atributos ANCHO/ALTO/LARGO.
-
-Solo el tipo **circular** usa bloques **para las paredes**
-(`DuctRunner.TraceDuctRun` decide `useBlocks = tipo == "Circular"`). El tipo
-**rectangular** siempre dibuja las paredes con líneas sueltas: sus esquinas a
-inglete se resuelven con el mismo cierre a inglete (`ProcessNextPiece`) que ya
-usan las reducciones y transiciones, simplemente sin pasar por `ProcessElbow`
-— no hace falta ninguna geometría de codo aparte, la intersección de las dos
-paredes ya da el vértice exacto a cualquier ángulo. El rótulo, en cambio,
-**siempre** es un bloque (`CVENT_ROTULO_*`), tanto en circular como en
-rectangular — ver por qué a continuación.
+  siguiente sección), con sus atributos ANCHO/ALTO/LARGO. Es el único bloque
+  que usa **siempre** el tipo rectangular (para las paredes de tramo recto no,
+  como se explica arriba).
 
 ### Por qué el rótulo es un bloque APARTE, no un atributo del tramo recto
 
