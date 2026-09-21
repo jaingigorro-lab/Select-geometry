@@ -12,23 +12,33 @@ using AcApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 namespace ConductosPlugin
 {
     // ==========================================================
-    // CVENT / CVENTT - Traza conductos de ventilacion circular en planta
-    // (representacion a dos lineas), con codos CURVOS, reducciones, y
+    // CVENT / CVENTT - Traza conductos de ventilacion en planta (representacion
+    // a dos lineas), circulares o rectangulares, con reducciones y
     // derivaciones en T o en cruz que se acoplan a un conducto ya existente.
-    // Traduccion 1:1 de ConductoVentilacionCircular_CVENT.lsp, con una
-    // diferencia deliberada: en vez de depender de una libreria de bloques
-    // externa (.dwg) construida a mano -algo que AutoLISP no puede generar-,
-    // este plugin CREA el mismo contrato de bloques (CVENT_TRAMO_RECTO,
-    // CVENT_REDUCCION, CVENT_CODO_<angulo>) la primera vez que hace falta,
-    // vease BlockFactory.
+    // Traduccion 1:1 de ConductoVentilacionCircular_CVENT.lsp (que solo
+    // contemplaba circular) con dos diferencias deliberadas:
     //
-    // CVENT  - traza un conducto nuevo desde cero, punto a punto.
+    //   - En vez de depender de una libreria de bloques externa (.dwg)
+    //     construida a mano -algo que AutoLISP no puede generar-, este plugin
+    //     CREA el mismo contrato de bloques (CVENT_TRAMO_RECTO,
+    //     CVENT_REDUCCION, CVENT_CODO_<angulo>) la primera vez que hace
+    //     falta, vease BlockFactory. Solo el tipo CIRCULAR usa bloques.
+    //   - Se anade el tipo RECTANGULAR: sin bloques (una pared a inglete no
+    //     se puede representar estirando en X un bloque de extremos siempre
+    //     perpendiculares), con esquinas a inglete -no curvas- solo a 90
+    //     grados, y una etiqueta de texto "AnchoxAlto" en cada tramo (en vez
+    //     del atributo de bloque que usa el circular, ya que no hay bloque).
+    //
+    // CVENT  - traza un conducto nuevo desde cero, punto a punto. Primero
+    //          pregunta el tipo (Circular/Rectangular).
     // CVENTT - arranca una derivacion (T o cruz) desde un punto de un
     //          conducto YA DIBUJADO con CVENT, y a partir de ahi se traza
-    //          igual que con CVENT.
+    //          igual que con CVENT. Por ahora solo admite derivaciones
+    //          circulares.
     //
-    // Cada giro se ajusta al multiplo de 15 grados mas cercano (hasta un
-    // maximo de 90). Se puede desactivar sobre la marcha con "Libre".
+    // En circular cada giro se ajusta al multiplo de 15 grados mas cercano
+    // (hasta un maximo de 90); en rectangular, solo a 90. Se puede
+    // desactivar sobre la marcha con "Libre".
     // ==========================================================
 
     internal static class CventConfig
@@ -39,8 +49,12 @@ namespace ConductosPlugin
         public const double TransitionFactor = 2.5;
         public const double TransitionMinFactor = 0.5;
 
-        // Incremento de angulo de giro admitido, y tope maximo (grados).
-        public const double AngleStep = 15.0;
+        // Incremento de angulo de giro admitido en circular (multiplos de 15, catalogo
+        // SMACNA); en rectangular solo se admite el giro a escuadra -vease
+        // DuctRunner.TraceDuctRun, que pasa 90 como paso para que RoundTo solo pueda
+        // dar 0 o 90-. Tope maximo (grados), igual para ambos tipos.
+        public const double AngleStepCircular = 15.0;
+        public const double AngleStepRectangular = 90.0;
         public const double AngleMax = 90.0;
 
         // Por debajo de este angulo (grados) un giro se considera "recto", sin codo.
@@ -139,6 +153,30 @@ namespace ConductosPlugin
             tr.AddNewlyCreatedDBObject(arc, true);
             return arc;
         }
+
+        /// <summary>Etiqueta "AnchoxAlto" para un tramo rectangular (no usa bloques ni
+        /// atributos -los tramos rectangulares se dibujan con lineas sueltas, ver
+        /// DuctTracer-): texto suelto centrado sobre el punto medio del tramo,
+        /// desplazado por fuera de la pared, con la altura proporcional al ancho.</summary>
+        public static void DrawRectLabel(Transaction tr, BlockTableRecord owner, Point2d start, Point2d end, double ancho, double alto)
+        {
+            Vector2d dir = GeometryUtil.UnitVector(start, end);
+            Vector2d perp = GeometryUtil.LeftNormal(dir);
+            var mid = new Point2d((start.X + end.X) / 2.0, (start.Y + end.Y) / 2.0);
+            double h = Math.Max(ancho * 0.2, 1.0);
+            var pos = new Point2d(mid.X + perp.X * (ancho / 2.0 + h), mid.Y + perp.Y * (ancho / 2.0 + h));
+
+            var text = new DBText
+            {
+                Position = new Point3d(pos.X, pos.Y, 0),
+                Height = h,
+                Rotation = GeometryUtil.VectorAngle(dir),
+                TextString = $"{ancho:0}x{alto:0}",
+                Layer = CventConfig.WallLayer,
+            };
+            owner.AppendEntity(text);
+            tr.AddNewlyCreatedDBObject(text, true);
+        }
     }
 
     /// <summary>
@@ -157,7 +195,7 @@ namespace ConductosPlugin
 
         public static string StraightBlockName(double diameter) => $"CVENT_TRAMO_RECTO_D{Tag(diameter)}";
         public static string ReductionBlockName(double d1, double d2) => $"CVENT_REDUCCION_D{Tag(d1)}_D{Tag(d2)}";
-        public static string ElbowBlockName(double angleDegAbs) => $"CVENT_CODO_A{Tag(Math.Round(angleDegAbs / CventConfig.AngleStep) * CventConfig.AngleStep)}";
+        public static string ElbowBlockName(double angleDegAbs) => $"CVENT_CODO_A{Tag(Math.Round(angleDegAbs / CventConfig.AngleStepCircular) * CventConfig.AngleStepCircular)}";
 
         private static bool HasContent(BlockTableRecord btr)
         {
@@ -188,14 +226,13 @@ namespace ConductosPlugin
 
         /// <summary>Tramo recto de longitud UNIDAD (1): dos lineas paralelas de (0,+-r)
         /// a (1,+-r) en la capa "0" (para heredar la capa de la insercion). Al
-        /// insertarse se estira en X = longitud real. Incluye dos definiciones de
-        /// atributo, ANCHO y LARGO, con posicion/altura en coordenadas LOCALES
-        /// proporcionales al diametro (fijo por definicion de bloque, asi que no hace
-        /// falta reposicionarlas por instancia): como el eje Y del bloque nunca se
-        /// escala (solo X, al estirar la longitud), esa geometria local sale
-        /// correcta en cualquier instancia sin tocarla. ANCHO no varia entre
-        /// instancias (mismo diametro); LARGO se sobreescribe por instancia en
-        /// PopulateAttributes.</summary>
+        /// insertarse se estira en X = longitud real. Incluye una definicion de
+        /// atributo, ANCHO ("%%C<diametro>", el simbolo de diametro de AutoCAD), con
+        /// posicion/altura en coordenadas LOCALES proporcionales al diametro (fijo
+        /// por definicion de bloque, asi que no hace falta reposicionarla por
+        /// instancia): como el eje Y del bloque nunca se escala (solo X, al estirar
+        /// la longitud), esa geometria local sale correcta en cualquier instancia sin
+        /// tocarla, y el valor tampoco varia entre instancias (mismo diametro).</summary>
         public static ObjectId EnsureStraightBlock(Transaction tr, Database db, double diameter)
         {
             string name = StraightBlockName(diameter);
@@ -207,8 +244,7 @@ namespace ConductosPlugin
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, -r), new Point2d(1, -r), "0");
 
             double h = Math.Max(diameter * 0.2, 1.0);
-            AddAttDef(tr, btr, "ANCHO", "Ancho (diametro)", new Point2d(0.5, r + h * 1.0), h, diameter.ToString("0"));
-            AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0.5, r + h * 2.4), h, "0");
+            AddAttDef(tr, btr, "ANCHO", "Diametro", new Point2d(0.5, r + h * 1.0), h, "%%C" + diameter.ToString("0"));
 
             return btr.ObjectId;
         }
@@ -231,9 +267,8 @@ namespace ConductosPlugin
 
         /// <summary>Crea las AttributeReference de un bloque recien insertado, una por
         /// cada AttributeDefinition no constante de su definicion (br debe estar ya
-        /// insertado y con BlockTransform valido), con el valor de LARGO ya puesto a
-        /// la longitud real de esta instancia.</summary>
-        private static void PopulateAttributes(Transaction tr, BlockReference br, ObjectId blockDefId, double length, double diameter)
+        /// insertado y con BlockTransform valido).</summary>
+        private static void PopulateAttributes(Transaction tr, BlockReference br, ObjectId blockDefId, double diameter)
         {
             double h = Math.Max(diameter * 0.2, 1.0);
             var btr = (BlockTableRecord)tr.GetObject(blockDefId, OpenMode.ForRead);
@@ -251,9 +286,7 @@ namespace ConductosPlugin
                     // bloque, no al ScaleFactors de esta instancia).
                     attRef.Height = h;
                     attRef.WidthFactor = 1.0;
-                    attRef.TextString = string.Equals(attDef.Tag, "LARGO", StringComparison.OrdinalIgnoreCase)
-                        ? length.ToString("0")
-                        : attDef.TextString;
+                    attRef.TextString = attDef.TextString;
                     br.AttributeCollection.AppendAttribute(attRef);
                     tr.AddNewlyCreatedDBObject(attRef, true);
                 }
@@ -262,10 +295,10 @@ namespace ConductosPlugin
 
         /// <summary>Tras cambiar el ScaleFactors.X de un BlockReference (tramo recto
         /// recortado porque el vertice de salida resulto ser un codo), recalcula la
-        /// geometria de sus atributos a partir del nuevo BlockTransform y actualiza
-        /// el valor de LARGO a la nueva longitud. ANCHO no cambia (el diametro es
-        /// fijo por bloque).</summary>
-        public static void ResyncAttributesAfterRescale(Transaction tr, BlockReference br, double newLength, double diameter)
+        /// posicion de sus atributos a partir del nuevo BlockTransform (el valor de
+        /// ANCHO no cambia, es fijo por bloque, pero la POSICION si depende de la
+        /// longitud -esta en el punto medio local, 0.5-).</summary>
+        public static void ResyncAttributesAfterRescale(Transaction tr, BlockReference br, double diameter)
         {
             double h = Math.Max(diameter * 0.2, 1.0);
             var btr = (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
@@ -283,8 +316,6 @@ namespace ConductosPlugin
                     attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
                 attRef.Height = h;
                 attRef.WidthFactor = 1.0;
-                if (string.Equals(attRef.Tag, "LARGO", StringComparison.OrdinalIgnoreCase))
-                    attRef.TextString = newLength.ToString("0");
             }
         }
 
@@ -312,7 +343,7 @@ namespace ConductosPlugin
         /// </summary>
         public static ObjectId EnsureElbowBlock(Transaction tr, Database db, double angleDegAbs)
         {
-            double snapped = Math.Round(angleDegAbs / CventConfig.AngleStep) * CventConfig.AngleStep;
+            double snapped = Math.Round(angleDegAbs / CventConfig.AngleStepCircular) * CventConfig.AngleStepCircular;
             string name = ElbowBlockName(snapped);
             BlockTableRecord btr = GetOrCreateEmptyBlock(tr, db, name);
             if (btr == null) return ExistingId(tr, db, name);
@@ -347,7 +378,7 @@ namespace ConductosPlugin
             owner.AppendEntity(br);
             tr.AddNewlyCreatedDBObject(br, true);
 
-            PopulateAttributes(tr, br, id, length, diameter);
+            PopulateAttributes(tr, br, id, diameter);
             return br;
         }
 
@@ -426,6 +457,11 @@ namespace ConductosPlugin
         /// <summary>Punto real de inicio del cuerpo (bloque) de esta pieza -para
         /// recalcular su longitud en AdjustBodyLength-.</summary>
         public Point2d BodyStartPt;
+
+        /// <summary>Alto (solo conductos rectangulares; 0 en circular). No influye en
+        /// la geometria en planta -Radius*2 ya hace de "ancho" para ambos tipos-,
+        /// solo se usa para rotular esta pieza como "AnchoxAlto" (DrawRectLabel).</summary>
+        public double Alto;
     }
 
     /// <summary>
@@ -458,6 +494,8 @@ namespace ConductosPlugin
                 DrawingUtil.DrawLine(tr, ms, oldPending.CenterStart, startPt, CventConfig.AxisLayer);
                 if (!GeometryUtil.DirsParallel(oldPending.LeftDir, leftDir))
                     DrawingUtil.DrawLine(tr, ms, jointL, jointR, CventConfig.WallLayer);
+                if (oldPending.Alto > 0)
+                    DrawingUtil.DrawRectLabel(tr, ms, oldPending.CenterStart, startPt, oldPending.Radius * 2.0, oldPending.Alto);
 
                 finalStartL = jointL;
                 finalStartR = jointR;
@@ -490,7 +528,7 @@ namespace ConductosPlugin
         /// Devuelve el nuevo estado pendiente, marcado WallsAlreadyDrawn si esta
         /// pieza se dibujo como bloque (sus paredes no haran falta dibujarlas de
         /// nuevo al cerrar la union con la siguiente).</summary>
-        public static PendingPiece DrawPiece(Transaction tr, Database db, BlockTableRecord ms, PendingPiece oldPending, Point2d startPt, Point2d endPt, double startRadius, double endRadius, bool useBlocks)
+        public static PendingPiece DrawPiece(Transaction tr, Database db, BlockTableRecord ms, PendingPiece oldPending, Point2d startPt, Point2d endPt, double startRadius, double endRadius, bool useBlocks, double alto = 0.0)
         {
             bool drewBlock = false;
             ObjectId bodyId = ObjectId.Null;
@@ -510,6 +548,7 @@ namespace ConductosPlugin
             pending.WallsAlreadyDrawn = drewBlock;
             pending.BodyBlockId = bodyId;
             pending.BodyStartPt = startPt;
+            pending.Alto = alto;
             return pending;
         }
 
@@ -529,7 +568,7 @@ namespace ConductosPlugin
             if (newLength < 1e-6) newLength = 1e-6;
             br.ScaleFactors = new Scale3d(newLength, br.ScaleFactors.Y, br.ScaleFactors.Z);
 
-            BlockFactory.ResyncAttributesAfterRescale(tr, br, newLength, piece.Radius * 2.0);
+            BlockFactory.ResyncAttributesAfterRescale(tr, br, piece.Radius * 2.0);
         }
 
         /// <summary>Codo curvo entre el final de la pieza pendiente y el inicio de la
@@ -643,13 +682,16 @@ namespace ConductosPlugin
                 DrawingUtil.DrawLine(tr, ms, pending.FinalStartR, pending.NaiveEndR, CventConfig.WallLayer);
             }
             DrawingUtil.DrawLine(tr, ms, pending.CenterStart, pending.CenterEnd, CventConfig.AxisLayer);
+            if (pending.Alto > 0)
+                DrawingUtil.DrawRectLabel(tr, ms, pending.CenterStart, pending.CenterEnd, pending.Radius * 2.0, pending.Alto);
         }
 
         /// <summary>Calcula el punto siguiente ajustado (si restrictMode y hay una
         /// direccion anterior) y el angulo de giro final con signo: + = izquierda, -
         /// = derecha. Si es el primer tramo del recorrido (lastDir nulo), angulo =
-        /// 0.</summary>
-        public static (Point2d point, double turnAngleRad) ResolveNextPoint(Point2d p0, Point2d pt, Vector2d? lastDir, bool restrictMode)
+        /// 0. angleStepDeg es el incremento de giro admitido (15 en circular, 90 en
+        /// rectangular -asi solo puede dar 0 o 90-).</summary>
+        public static (Point2d point, double turnAngleRad) ResolveNextPoint(Point2d p0, Point2d pt, Vector2d? lastDir, bool restrictMode, double angleStepDeg)
         {
             if (lastDir == null) return (pt, 0.0);
 
@@ -662,7 +704,7 @@ namespace ConductosPlugin
             double finalRad;
             if (restrictMode)
             {
-                double snappedDeg = GeometryUtil.RoundTo(GeometryUtil.Rtd(deflection), CventConfig.AngleStep);
+                double snappedDeg = GeometryUtil.RoundTo(GeometryUtil.Rtd(deflection), angleStepDeg);
                 snappedDeg = Math.Max(-CventConfig.AngleMax, Math.Min(CventConfig.AngleMax, snappedDeg));
                 finalRad = GeometryUtil.Dtr(snappedDeg);
             }
@@ -687,22 +729,33 @@ namespace ConductosPlugin
     /// </summary>
     internal static class DuctRunner
     {
-        public static void TraceDuctRun(Database db, Editor ed, double diam, Point2d p0, PendingPiece pending, Vector2d? lastDir, bool restrictAngles, string cmdTag)
+        public static void TraceDuctRun(Database db, Editor ed, string tipo, double diam, double alto, Point2d p0, PendingPiece pending, Vector2d? lastDir, bool restrictAngles, string cmdTag)
         {
-            const bool useBlocks = true; // los bloques se generan solos, vease BlockFactory
+            // Circular: bloques (tramo/reduccion/codo, todos generados por
+            // BlockFactory) y codos CURVOS via ProcessElbow. Rectangular: sin
+            // bloques (una pared a inglete no se puede representar estirando en X un
+            // bloque de extremos siempre perpendiculares) y esquinas a inglete
+            // mediante el cierre normal de ProcessNextPiece -sin ProcessElbow-, que
+            // calcula el vertice exacto por interseccion de paredes sea cual sea el
+            // angulo.
+            bool useBlocks = tipo == "Circular";
+            double angleStep = tipo == "Circular" ? CventConfig.AngleStepCircular : CventConfig.AngleStepRectangular;
+            string dimKeyword = tipo == "Circular" ? "Diametro" : "Ancho";
+
             double? pendDiam = null;
+            double pendAlto = alto;
             int segCount = 0, redCount = 0, elbowCount = 0;
             bool done = false;
 
             while (!done)
             {
-                var pko = new PromptPointOptions($"\n[{cmdTag}] Punto siguiente [Diametro/Libre/Salir] <Salir>: ")
+                var pko = new PromptPointOptions($"\n[{cmdTag}] Punto siguiente [{dimKeyword}/Libre/Salir] <Salir>: ")
                 {
                     UseBasePoint = true,
                     BasePoint = new Point3d(p0.X, p0.Y, 0),
                     AllowNone = true,
                 };
-                pko.Keywords.Add("Diametro");
+                pko.Keywords.Add(dimKeyword);
                 pko.Keywords.Add("Libre");
                 pko.Keywords.Add("Salir");
                 var ppr = ed.GetPoint(pko);
@@ -710,38 +763,51 @@ namespace ConductosPlugin
                 if (ppr.Status == PromptStatus.None) { done = true; continue; }
                 if (ppr.Status == PromptStatus.Keyword)
                 {
-                    switch (ppr.StringResult)
+                    if (ppr.StringResult == dimKeyword)
                     {
-                        case "Diametro":
+                        double def = pendDiam ?? diam;
+                        var pdo = new PromptDistanceOptions($"\n[{cmdTag}] Nuevo {(tipo == "Circular" ? "diametro" : "ancho")}: ")
                         {
-                            double def = pendDiam ?? diam;
-                            var pdo = new PromptDistanceOptions($"\n[{cmdTag}] Nuevo diametro: ")
+                            AllowNegative = false,
+                            AllowZero = false,
+                            DefaultValue = def,
+                            UseDefaultValue = true,
+                        };
+                        var pdr = ed.GetDistance(pdo);
+                        pendDiam = pdr.Status == PromptStatus.OK ? pdr.Value : def;
+
+                        if (tipo == "Rectangular")
+                        {
+                            var pdoAlto = new PromptDistanceOptions($"\n[{cmdTag}] Nuevo alto: ")
                             {
                                 AllowNegative = false,
                                 AllowZero = false,
-                                DefaultValue = def,
+                                DefaultValue = pendAlto,
                                 UseDefaultValue = true,
                             };
-                            var pdr = ed.GetDistance(pdo);
-                            pendDiam = pdr.Status == PromptStatus.OK ? pdr.Value : def;
-                            break;
+                            var pdrAlto = ed.GetDistance(pdoAlto);
+                            pendAlto = pdrAlto.Status == PromptStatus.OK ? pdrAlto.Value : pendAlto;
                         }
-                        case "Libre":
-                            restrictAngles = !restrictAngles;
-                            ed.WriteMessage(restrictAngles
+                    }
+                    else if (ppr.StringResult == "Libre")
+                    {
+                        restrictAngles = !restrictAngles;
+                        ed.WriteMessage(restrictAngles
+                            ? (tipo == "Circular"
                                 ? $"\n[{cmdTag}] Giros restringidos a multiplos de 15 grados."
-                                : $"\n[{cmdTag}] Giros libres (sin restriccion de angulo).");
-                            break;
-                        case "Salir":
-                            done = true;
-                            break;
+                                : $"\n[{cmdTag}] Giros restringidos a 90 grados (esquina a inglete).")
+                            : $"\n[{cmdTag}] Giros libres (sin restriccion de angulo).");
+                    }
+                    else if (ppr.StringResult == "Salir")
+                    {
+                        done = true;
                     }
                     continue;
                 }
                 if (ppr.Status != PromptStatus.OK) { done = true; continue; }
 
                 Point2d pt = new Point2d(ppr.Value.X, ppr.Value.Y);
-                (Point2d resolvedPt, double turnAngle) = DuctTracer.ResolveNextPoint(p0, pt, lastDir, restrictAngles);
+                (Point2d resolvedPt, double turnAngle) = DuctTracer.ResolveNextPoint(p0, pt, lastDir, restrictAngles, angleStep);
                 pt = resolvedPt;
                 if (restrictAngles && Math.Abs(GeometryUtil.Rtd(turnAngle)) > 1e-6)
                     ed.WriteMessage($"\n[{cmdTag}] Giro ajustado a {GeometryUtil.Rtd(turnAngle):0} grados.");
@@ -754,8 +820,11 @@ namespace ConductosPlugin
                     Point2d effectiveStart = p0;
                     if (pending != null && Math.Abs(GeometryUtil.Rtd(turnAngle)) > CventConfig.AngleEpsilonDeg)
                     {
-                        pending = DuctTracer.ProcessElbow(tr, db, ms, pending, p0, pt, turnAngle, useBlocks);
-                        effectiveStart = pending.CenterStart;
+                        if (tipo == "Circular")
+                        {
+                            pending = DuctTracer.ProcessElbow(tr, db, ms, pending, p0, pt, turnAngle, useBlocks);
+                            effectiveStart = pending.CenterStart;
+                        }
                         elbowCount++;
                     }
 
@@ -768,20 +837,21 @@ namespace ConductosPlugin
                             CventConfig.TransitionMinFactor * Math.Min(diam, pendDiam.Value)));
                         Point2d pMid = new Point2d(effectiveStart.X + dirv.X * transLen, effectiveStart.Y + dirv.Y * transLen);
 
-                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pMid, diam / 2.0, pendDiam.Value / 2.0, useBlocks);
+                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pMid, diam / 2.0, pendDiam.Value / 2.0, useBlocks, alto);
                         redCount++;
 
                         if (pMid.GetDistanceTo(pt) > 1e-6)
                         {
-                            pending = DuctTracer.DrawPiece(tr, db, ms, pending, pMid, pt, pendDiam.Value / 2.0, pendDiam.Value / 2.0, useBlocks);
+                            pending = DuctTracer.DrawPiece(tr, db, ms, pending, pMid, pt, pendDiam.Value / 2.0, pendDiam.Value / 2.0, useBlocks, pendAlto);
                             segCount++;
                         }
                         diam = pendDiam.Value;
+                        alto = pendAlto;
                         pendDiam = null;
                     }
                     else
                     {
-                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pt, diam / 2.0, diam / 2.0, useBlocks);
+                        pending = DuctTracer.DrawPiece(tr, db, ms, pending, effectiveStart, pt, diam / 2.0, diam / 2.0, useBlocks, alto);
                         segCount++;
                     }
 
@@ -822,23 +892,59 @@ namespace ConductosPlugin
                 tr.Commit();
             }
 
-            var pdo = new PromptDistanceOptions("\n[CVENT] Diametro inicial del conducto: ")
+            var pkoTipo = new PromptKeywordOptions("\n[CVENT] Tipo de conducto [Circular/Rectangular] <Circular>: ") { AllowNone = true };
+            pkoTipo.Keywords.Add("Circular");
+            pkoTipo.Keywords.Add("Rectangular");
+            pkoTipo.Keywords.Default = "Circular";
+            var pkrTipo = ed.GetKeywords(pkoTipo);
+            if (pkrTipo.Status == PromptStatus.Cancel) { ed.WriteMessage("\n[CVENT] Cancelado."); return; }
+            string tipo = (pkrTipo.Status == PromptStatus.OK && !string.IsNullOrEmpty(pkrTipo.StringResult)) ? pkrTipo.StringResult : "Circular";
+
+            double diam, alto = 0.0;
+            if (tipo == "Circular")
             {
-                AllowNegative = false,
-                AllowZero = false,
-                DefaultValue = 200.0,
-                UseDefaultValue = true,
-            };
-            var pdr = ed.GetDistance(pdo);
-            double diam = pdr.Status == PromptStatus.OK ? pdr.Value : 200.0;
+                var pdo = new PromptDistanceOptions("\n[CVENT] Diametro inicial del conducto: ")
+                {
+                    AllowNegative = false,
+                    AllowZero = false,
+                    DefaultValue = 200.0,
+                    UseDefaultValue = true,
+                };
+                var pdr = ed.GetDistance(pdo);
+                diam = pdr.Status == PromptStatus.OK ? pdr.Value : 200.0;
+            }
+            else
+            {
+                var pdoAncho = new PromptDistanceOptions("\n[CVENT] Ancho inicial del conducto: ")
+                {
+                    AllowNegative = false,
+                    AllowZero = false,
+                    DefaultValue = 400.0,
+                    UseDefaultValue = true,
+                };
+                var pdrAncho = ed.GetDistance(pdoAncho);
+                diam = pdrAncho.Status == PromptStatus.OK ? pdrAncho.Value : 400.0;
+
+                var pdoAlto = new PromptDistanceOptions("\n[CVENT] Alto inicial del conducto: ")
+                {
+                    AllowNegative = false,
+                    AllowZero = false,
+                    DefaultValue = 200.0,
+                    UseDefaultValue = true,
+                };
+                var pdrAlto = ed.GetDistance(pdoAlto);
+                alto = pdrAlto.Status == PromptStatus.OK ? pdrAlto.Value : 200.0;
+            }
 
             var pprFirst = ed.GetPoint("\n[CVENT] Punto inicial del conducto: ");
             if (pprFirst.Status != PromptStatus.OK) { ed.WriteMessage("\n[CVENT] Cancelado."); return; }
             Point2d p0 = new Point2d(pprFirst.Value.X, pprFirst.Value.Y);
 
-            ed.WriteMessage("\n[CVENT] Giros restringidos a multiplos de 15 grados (maximo 90). Escribe \"Libre\" para alternar.");
+            ed.WriteMessage(tipo == "Circular"
+                ? "\n[CVENT] Giros restringidos a multiplos de 15 grados (maximo 90). Escribe \"Libre\" para alternar."
+                : "\n[CVENT] Giros restringidos a 90 grados (esquina a inglete). Escribe \"Libre\" para alternar.");
 
-            DuctRunner.TraceDuctRun(db, ed, diam, p0, null, null, true, "CVENT");
+            DuctRunner.TraceDuctRun(db, ed, tipo, diam, alto, p0, null, null, true, "CVENT");
         }
     }
 
@@ -929,20 +1035,21 @@ namespace ConductosPlugin
                 DrawBranchStartMarkTx(db, edgePoint, branchDir, branchRadius);
 
                 ed.WriteMessage("\n[CVENTT] --- Trazando la derivacion ---");
-                DuctRunner.TraceDuctRun(db, ed, branchDiam, edgePoint, null, branchDir, true, "CVENTT");
+                // CVENTT solo admite derivaciones circulares por ahora.
+                DuctRunner.TraceDuctRun(db, ed, "Circular", branchDiam, 0.0, edgePoint, null, branchDir, true, "CVENTT");
             }
             else
             {
                 Point2d edgePoint1 = MainDuctEdgePoint(mainAxisPt, mainDir, mainRadius, branchDir);
                 DrawBranchStartMarkTx(db, edgePoint1, branchDir, branchRadius);
                 ed.WriteMessage("\n[CVENTT] --- Trazando la primera derivacion (lado 1) ---");
-                DuctRunner.TraceDuctRun(db, ed, branchDiam, edgePoint1, null, branchDir, true, "CVENTT");
+                DuctRunner.TraceDuctRun(db, ed, "Circular", branchDiam, 0.0, edgePoint1, null, branchDir, true, "CVENTT");
 
                 Vector2d branchDir2 = new Vector2d(-branchDir.X, -branchDir.Y);
                 Point2d edgePoint2 = MainDuctEdgePoint(mainAxisPt, mainDir, mainRadius, branchDir2);
                 DrawBranchStartMarkTx(db, edgePoint2, branchDir2, branchRadius);
                 ed.WriteMessage("\n[CVENTT] --- Trazando la segunda derivacion (lado 2) ---");
-                DuctRunner.TraceDuctRun(db, ed, branchDiam, edgePoint2, null, branchDir2, true, "CVENTT");
+                DuctRunner.TraceDuctRun(db, ed, "Circular", branchDiam, 0.0, edgePoint2, null, branchDir2, true, "CVENTT");
             }
         }
 
@@ -960,7 +1067,7 @@ namespace ConductosPlugin
             double finalRad;
             if (restrictMode)
             {
-                double snappedDeg = GeometryUtil.RoundTo(GeometryUtil.Rtd(deflection), CventConfig.AngleStep);
+                double snappedDeg = GeometryUtil.RoundTo(GeometryUtil.Rtd(deflection), CventConfig.AngleStepCircular);
                 snappedDeg = Math.Max(-CventConfig.AngleMax, Math.Min(CventConfig.AngleMax, snappedDeg));
                 finalRad = GeometryUtil.Dtr(snappedDeg);
                 ed.WriteMessage($"\n[CVENTT] Angulo de la derivacion respecto al principal: {snappedDeg:0} grados.");

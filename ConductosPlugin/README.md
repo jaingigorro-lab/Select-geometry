@@ -6,17 +6,28 @@ repo), usando la API real de AutoCAD (`Autodesk.AutoCAD.DatabaseServices`, etc.)
 vez de AutoLISP/ActiveX. Todo el código vive en un único archivo,
 `ConductosPlugin.cs`.
 
-Traza conductos de ventilación circular en planta (representación a dos líneas),
-con codos **curvos**, reducciones, y derivaciones en T o en cruz que se acoplan a
-un conducto ya existente.
+Traza conductos de ventilación en planta (representación a dos líneas),
+**circulares o rectangulares**, con reducciones y derivaciones en T o en cruz
+que se acoplan a un conducto ya existente.
 
 ## Comandos
 
-- **CVENT** — traza un conducto nuevo desde cero, punto a punto. Cada giro se
-  ajusta al múltiplo de 15° más cercano (hasta 90°); se puede desactivar sobre la
-  marcha con la palabra clave `Libre`. Con `Diametro` se fija un diámetro nuevo: al
-  marcar el punto siguiente se inserta la reducción automáticamente y el conducto
-  continúa ya con el diámetro nuevo. `Salir` (o Intro) termina el trazado.
+- **CVENT** — traza un conducto nuevo desde cero, punto a punto. Primero
+  pregunta el tipo (`Circular`/`Rectangular`):
+  - **Circular**: pide el diámetro; cada giro se ajusta al múltiplo de 15° más
+    cercano (hasta 90°), con codos **curvos** (bloque de 3 arcos concéntricos,
+    o arcos sueltos como reserva).
+  - **Rectangular**: pide ancho y alto; solo se admiten giros a 90°, resueltos
+    como esquina **a inglete** (sin curva) — no usa bloques para las paredes,
+    ya que un extremo cortado en ángulo no se puede representar estirando un
+    bloque de extremos siempre perpendiculares. Cada tramo lleva una etiqueta
+    de texto "AnchoxAlto".
+
+  Se puede desactivar la restricción de ángulo sobre la marcha con la palabra
+  clave `Libre`. Con `Diametro` (circular) o `Ancho` (rectangular, que
+  también pide un `Alto` nuevo) se fija una dimensión nueva: al marcar el
+  punto siguiente se inserta la reducción automáticamente y el conducto
+  continúa ya con la dimensión nueva. `Salir` (o Intro) termina el trazado.
 
 - **CVENTT** — arranca una derivación (T o cruz) desde un punto de un conducto ya
   dibujado con CVENT: seleccionas el **eje** (capa `MEP-CONDUCTOS-EJE`, no la
@@ -24,13 +35,13 @@ un conducto ya existente.
   Te o Cruz, y (si es Te) marcas con un clic hacia qué lado sale. A partir de ahí
   se traza igual que con CVENT. El conducto principal nunca se modifica ni se
   corta — solo se marca el arranque de cada ramal con una línea perpendicular
-  sobre su propio eje.
+  sobre su propio eje. Por ahora **CVENTT solo admite derivaciones circulares**.
 
 Cada codo, cada reducción y cada derivación quedan delimitados con una línea
 perpendicular al conducto que marca dónde empieza y dónde termina esa pieza
 especial. Las paredes de tramos vecinos se unen a inglete en cada vértice.
 
-## Bloques: se generan solos, no hace falta una librería externa
+## Bloques: se generan solos, no hace falta una librería externa (solo circular)
 
 El LSP original necesitaba una librería de bloques (`.dwg`) construida a mano en
 `BEDIT` — AutoLISP no puede crear bloques dinámicos. En C# **no hace falta**: el
@@ -39,17 +50,36 @@ de `ConductosPlugin.cs`) y los reutiliza después:
 
 - `CVENT_TRAMO_RECTO_D<diámetro>` y `CVENT_REDUCCION_D<d1>_D<d2>` — un cuerpo de
   longitud **unidad** (1) que se estira en X (`ScaleFactors`) a la longitud real
-  de cada tramo al insertarse.
+  de cada tramo al insertarse. El tramo recto incluye un atributo `ANCHO` con
+  el símbolo de diámetro (`%%C200`), en una posición local proporcional al
+  diámetro (no cambia entre instancias, ya que cada bloque es por diámetro).
 - `CVENT_CODO_A<ángulo>` — un único bloque por ángulo normalizado (15/30/45/
   60/75/90), construido a un diámetro de referencia (100) con tres arcos
   concéntricos (pared interior, eje, pared exterior); se inserta escalado
-  uniformemente al diámetro real, y reflejado (`ScaleFactors.X` negativo) para
-  un giro a la derecha.
+  uniformemente al diámetro real, y reflejado (`ScaleFactors.Y` negativo, ver
+  más abajo por qué Y y no X) para un giro a la derecha.
 
-Si por lo que sea la creación de un bloque fallara, el propio `DuctTracer` puede
-recurrir a líneas/arcos sueltos (`useBlocks = false`) — hoy `DuctRunner` siempre
-pide bloques, ya que `BlockFactory` los genera bajo demanda y no depende de
-ningún archivo externo.
+Solo el tipo **circular** usa bloques (`DuctRunner.TraceDuctRun` decide
+`useBlocks = tipo == "Circular"`). El tipo **rectangular** siempre dibuja con
+líneas sueltas: sus esquinas a inglete se resuelven con el mismo cierre a
+inglete (`ProcessNextPiece`) que ya usan las reducciones y transiciones,
+simplemente sin pasar por `ProcessElbow` — no hace falta ninguna geometría de
+codo aparte, la intersección de las dos paredes ya da el vértice exacto a
+cualquier ángulo. Como no hay bloque, el ancho×alto de cada tramo rectangular
+se rotula con un `DBText` suelto (`DrawingUtil.DrawRectLabel`), no con un
+atributo.
+
+### Cuidado con la escala no uniforme en los atributos
+
+Los bloques de tramo recto/reducción se insertan con `ScaleFactors` **no
+uniforme** (X = longitud real, Y = 1 fijo). `AttributeReference.SetAttributeFromBlock`
+calcula bien `Position`/`Rotation` bajo esa transformación, pero **no**
+`Height`/`WidthFactor` — sale un texto con una altura disparatada (proporcional
+a la longitud, no al diámetro), que de lejos parece una mancha y, al hacer
+zoom, "desaparece" porque estás dentro de una letra gigante. `BlockFactory`
+fija `Height`/`WidthFactor` a mano tras cada `SetAttributeFromBlock`
+(`PopulateAttributes`, `ResyncAttributesAfterRescale`), usando el diámetro
+(fijo por bloque) en vez del `ScaleFactors` de la instancia.
 
 ## Corrección respecto al LSP original
 
