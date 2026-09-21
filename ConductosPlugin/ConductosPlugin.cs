@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Colors;
@@ -188,10 +189,13 @@ namespace ConductosPlugin
         /// <summary>Tramo recto de longitud UNIDAD (1): dos lineas paralelas de (0,+-r)
         /// a (1,+-r) en la capa "0" (para heredar la capa de la insercion). Al
         /// insertarse se estira en X = longitud real. Incluye dos definiciones de
-        /// atributo (ANCHO, LARGO) -su geometria aqui es solo una plantilla minima
-        /// valida; la posicion/altura/valor reales de cada instancia se fijan aparte
-        /// en SetSizeAttributes, para que el texto no salga deformado al estirar el
-        /// bloque en X-.</summary>
+        /// atributo, ANCHO y LARGO, con posicion/altura en coordenadas LOCALES
+        /// proporcionales al diametro (fijo por definicion de bloque, asi que no hace
+        /// falta reposicionarlas por instancia): como el eje Y del bloque nunca se
+        /// escala (solo X, al estirar la longitud), esa geometria local sale
+        /// correcta en cualquier instancia sin tocarla. ANCHO no varia entre
+        /// instancias (mismo diametro); LARGO se sobreescribe por instancia en
+        /// PopulateAttributes.</summary>
         public static ObjectId EnsureStraightBlock(Transaction tr, Database db, double diameter)
         {
             string name = StraightBlockName(diameter);
@@ -202,28 +206,24 @@ namespace ConductosPlugin
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, r), new Point2d(1, r), "0");
             DrawingUtil.DrawLine(tr, btr, new Point2d(0, -r), new Point2d(1, -r), "0");
 
-            AddAttDef(tr, btr, "ANCHO", "Ancho (diametro)", new Point2d(0.5, 0.0));
-            AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0.5, -0.2));
+            double h = Math.Max(diameter * 0.2, 1.0);
+            AddAttDef(tr, btr, "ANCHO", "Ancho (diametro)", new Point2d(0.5, r + h * 1.0), h, diameter.ToString("0"));
+            AddAttDef(tr, btr, "LARGO", "Largo", new Point2d(0.5, r + h * 2.4), h, "0");
 
             return btr.ObjectId;
         }
 
-        private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos)
+        private static void AddAttDef(Transaction tr, BlockTableRecord btr, string tag, string prompt, Point2d pos, double height, string defaultValue)
         {
-            var pos3d = new Point3d(pos.X, pos.Y, 0);
-            // El orden importa: fijar AlignmentPoint mientras Justify sigue en su
-            // valor por defecto (BaseLeft) lanza eNotApplicable -Justify tiene que
-            // fijarse ANTES de tocar AlignmentPoint.
             var attDef = new AttributeDefinition
             {
-                Position = pos3d,
-                Height = 0.1,
+                Position = new Point3d(pos.X, pos.Y, 0),
+                Height = height,
                 Tag = tag,
                 Prompt = prompt,
-                TextString = "0",
+                TextString = defaultValue,
+                Justify = AttachmentPoint.BaseLeft,
                 Layer = "0",
-                Justify = AttachmentPoint.MiddleCenter,
-                AlignmentPoint = pos3d,
             };
             btr.AppendEntity(attDef);
             tr.AddNewlyCreatedDBObject(attDef, true);
@@ -231,8 +231,9 @@ namespace ConductosPlugin
 
         /// <summary>Crea las AttributeReference de un bloque recien insertado, una por
         /// cada AttributeDefinition no constante de su definicion (br debe estar ya
-        /// insertado y con BlockTransform valido).</summary>
-        private static void PopulateAttributesFromBlock(Transaction tr, BlockReference br, ObjectId blockDefId)
+        /// insertado y con BlockTransform valido), con el valor de LARGO ya puesto a
+        /// la longitud real de esta instancia.</summary>
+        private static void PopulateAttributes(Transaction tr, BlockReference br, ObjectId blockDefId, double length)
         {
             var btr = (BlockTableRecord)tr.GetObject(blockDefId, OpenMode.ForRead);
             foreach (ObjectId defId in btr)
@@ -242,45 +243,37 @@ namespace ConductosPlugin
                 {
                     var attRef = new AttributeReference();
                     attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
-                    attRef.TextString = attDef.TextString;
+                    attRef.TextString = string.Equals(attDef.Tag, "LARGO", StringComparison.OrdinalIgnoreCase)
+                        ? length.ToString("0")
+                        : attDef.TextString;
                     br.AttributeCollection.AppendAttribute(attRef);
                     tr.AddNewlyCreatedDBObject(attRef, true);
                 }
             }
         }
 
-        /// <summary>Fija la posicion (junto al punto medio real del tramo), altura
-        /// (proporcional al diametro) y valor de los atributos ANCHO/LARGO de un
-        /// tramo recto -de forma independiente al ScaleFactors del BlockReference,
-        /// para que el texto no salga estirado/deformado al escalar el bloque en X-.
-        /// No hace nada si el bloque no tiene esos atributos (p.ej. una reduccion, o
-        /// un codo). Hay que volver a llamarla cada vez que cambie la longitud real
-        /// del tramo (vease DuctTracer -el eje/pared se puede recortar despues, al
-        /// procesar un codo).</summary>
-        public static void SetSizeAttributes(Transaction tr, BlockReference br, Point2d startPt, double dirAngle, double length, double diameter)
+        /// <summary>Tras cambiar el ScaleFactors.X de un BlockReference (tramo recto
+        /// recortado porque el vertice de salida resulto ser un codo), recalcula la
+        /// geometria de sus atributos a partir del nuevo BlockTransform y actualiza
+        /// el valor de LARGO a la nueva longitud. ANCHO no cambia (el diametro es
+        /// fijo por bloque).</summary>
+        public static void ResyncAttributesAfterRescale(Transaction tr, BlockReference br, double newLength)
         {
-            var dir = new Vector2d(Math.Cos(dirAngle), Math.Sin(dirAngle));
-            Vector2d perp = GeometryUtil.LeftNormal(dir);
-            var mid = new Point2d(startPt.X + dir.X * length / 2.0, startPt.Y + dir.Y * length / 2.0);
-            double h = Math.Max(diameter * 0.2, 1.0);
+            var btr = (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
+            var defsByTag = new Dictionary<string, AttributeDefinition>(StringComparer.OrdinalIgnoreCase);
+            foreach (ObjectId defId in btr)
+            {
+                var defEnt = tr.GetObject(defId, OpenMode.ForRead);
+                if (defEnt is AttributeDefinition attDef && !attDef.Constant) defsByTag[attDef.Tag] = attDef;
+            }
 
             foreach (ObjectId attId in br.AttributeCollection)
             {
                 var attRef = (AttributeReference)tr.GetObject(attId, OpenMode.ForWrite);
-                bool isAncho = string.Equals(attRef.Tag, "ANCHO", StringComparison.OrdinalIgnoreCase);
-                double lineOffset = isAncho ? 1.0 : 2.4;
-                var pos = new Point2d(
-                    mid.X + perp.X * (diameter / 2.0 + h * lineOffset),
-                    mid.Y + perp.Y * (diameter / 2.0 + h * lineOffset));
-                var pos3d = new Point3d(pos.X, pos.Y, 0);
-                // Igual que en AddAttDef: Justify tiene que fijarse ANTES de tocar
-                // AlignmentPoint, o AutoCAD lanza eNotApplicable.
-                attRef.Justify = AttachmentPoint.MiddleCenter;
-                attRef.Position = pos3d;
-                attRef.AlignmentPoint = pos3d;
-                attRef.Height = h;
-                attRef.Rotation = dirAngle;
-                attRef.TextString = (isAncho ? diameter : length).ToString("0");
+                if (defsByTag.TryGetValue(attRef.Tag, out AttributeDefinition attDef))
+                    attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
+                if (string.Equals(attRef.Tag, "LARGO", StringComparison.OrdinalIgnoreCase))
+                    attRef.TextString = newLength.ToString("0");
             }
         }
 
@@ -343,8 +336,7 @@ namespace ConductosPlugin
             owner.AppendEntity(br);
             tr.AddNewlyCreatedDBObject(br, true);
 
-            PopulateAttributesFromBlock(tr, br, id);
-            SetSizeAttributes(tr, br, startPt, dirAngle, length, diameter);
+            PopulateAttributes(tr, br, id, length);
             return br;
         }
 
@@ -526,8 +518,7 @@ namespace ConductosPlugin
             if (newLength < 1e-6) newLength = 1e-6;
             br.ScaleFactors = new Scale3d(newLength, br.ScaleFactors.Y, br.ScaleFactors.Z);
 
-            double dirAngle = GeometryUtil.VectorAngle(piece.Dir);
-            BlockFactory.SetSizeAttributes(tr, br, piece.BodyStartPt, dirAngle, newLength, piece.Radius * 2.0);
+            BlockFactory.ResyncAttributesAfterRescale(tr, br, newLength);
         }
 
         /// <summary>Codo curvo entre el final de la pieza pendiente y el inicio de la
@@ -687,14 +678,7 @@ namespace ConductosPlugin
     {
         public static void TraceDuctRun(Database db, Editor ed, double diam, Point2d p0, PendingPiece pending, Vector2d? lastDir, bool restrictAngles, string cmdTag)
         {
-            // DESACTIVADO TEMPORALMENTE (diagnostico): con "true" aparecia un
-            // abanico de lineas mal insertadas -radiando desde un mismo punto- tras
-            // un trazado de solo 3 tramos y 2 codos, sin que el bucle de trazado se
-            // repitiera de mas (confirmado por el log de comandos). Con "false" se
-            // vuelve al dibujo con lineas/arcos sueltos (sin bloques, sin
-            // atributos), la parte mas sencilla y ya validada geometricamente, para
-            // aislar si el fallo esta en la insercion/escalado de bloques.
-            const bool useBlocks = false;
+            const bool useBlocks = true; // los bloques se generan solos, vease BlockFactory
             double? pendDiam = null;
             int segCount = 0, redCount = 0, elbowCount = 0;
             bool done = false;
