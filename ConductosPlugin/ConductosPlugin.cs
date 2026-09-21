@@ -153,6 +153,17 @@ namespace ConductosPlugin
             return arc;
         }
 
+        /// <summary>Fuerza la variable de sistema ATTDISP a 1 ("Normal"): con
+        /// ATTDISP en 2 ("Activado"), AutoCAD fuerza TODOS los atributos de bloque a
+        /// verse, sea cual sea su propio flag Invisible -incluida la seccion de un
+        /// codo, que este plugin deja siempre invisible (BlockFactory.InsertLabel,
+        /// forceInvisible)-, lo que parece un fallo del plugin sin serlo. CVENT y
+        /// CVENTT llaman a esto al arrancar para que la visibilidad de cada rotulo
+        /// dependa solo de su propio flag, como se espera.</summary>
+        public static void EnsureAttDispNormal()
+        {
+            AcApp.SetSystemVariable("ATTDISP", 1);
+        }
     }
 
     /// <summary>
@@ -1022,6 +1033,7 @@ namespace ConductosPlugin
             Database db = doc.Database;
             Editor ed = doc.Editor;
 
+            DrawingUtil.EnsureAttDispNormal();
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 DrawingUtil.EnsureLayer(tr, db, CventConfig.WallLayer, CventConfig.WallColor);
@@ -1122,6 +1134,7 @@ namespace ConductosPlugin
             Database db = doc.Database;
             Editor ed = doc.Editor;
 
+            DrawingUtil.EnsureAttDispNormal();
             using (Transaction tr0 = db.TransactionManager.StartTransaction())
             {
                 DrawingUtil.EnsureLayer(tr0, db, CventConfig.WallLayer, CventConfig.WallColor);
