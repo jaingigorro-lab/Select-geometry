@@ -17,11 +17,15 @@ que se acoplan a un conducto ya existente.
   - **Circular**: pide el diámetro; cada giro se ajusta al múltiplo de 15° más
     cercano (hasta 90°), con codos **curvos** (bloque de 3 arcos concéntricos,
     o arcos sueltos como reserva).
-  - **Rectangular**: pide ancho y alto; solo se admiten giros a 90°, resueltos
-    como esquina **a inglete** (sin curva) — no usa bloques para las paredes,
-    ya que un extremo cortado en ángulo no se puede representar estirando un
-    bloque de extremos siempre perpendiculares. Cada tramo lleva un rótulo de
-    texto "AnchoxAlto".
+  - **Rectangular**: pide ancho y alto; los giros se ajustan al mismo
+    múltiplo de 15° (hasta 90°) que en circular, resueltos siempre como
+    esquina **a inglete** (sin curva) — no usa bloques para las paredes, ya
+    que un extremo cortado en ángulo no se puede representar estirando un
+    bloque de extremos siempre perpendiculares; la intersección de las dos
+    paredes ya da el vértice exacto a cualquier ángulo normalizado, no solo
+    90°. La sección del codo (igual que en circular) queda solo en
+    Propiedades, nunca dibujada. Cada tramo recto lleva un rótulo con
+    atributos ANCHO/ALTO (ancho × alto).
 
   Al principio también se pregunta la **altura de texto** de los rótulos —
   la eliges tú, según la escala de dibujo que vayas a usar. Cada tramo
@@ -104,6 +108,12 @@ a mano — el mismo mecanismo que ya usaba, sin problemas, el bloque de codo.
 Como es un bloque independiente de las paredes, funciona igual en circular
 (paredes en bloque) y en rectangular (paredes en líneas sueltas): el rótulo
 siempre queda vinculado, y su tamaño siempre sale bien calculado.
+
+El rótulo se orienta con la dirección del tramo (`BlockFactory.InsertLabel`),
+pero si esa dirección cae en la mitad "de vuelta" (más de 90° respecto a la
+horizontal) se gira 180° adicionales, para que el texto nunca salga boca
+abajo o al revés — se lee siempre de izquierda a derecha, sea cual sea el
+sentido en que se trazó el tramo.
 
 ## Corrección respecto al LSP original
 

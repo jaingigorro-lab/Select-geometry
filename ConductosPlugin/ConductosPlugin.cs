@@ -22,11 +22,13 @@ namespace ConductosPlugin
     //     CREA el mismo contrato de bloques (CVENT_TRAMO_RECTO,
     //     CVENT_REDUCCION, CVENT_CODO_<angulo>) la primera vez que hace
     //     falta, vease BlockFactory. Solo el tipo CIRCULAR usa bloques.
-    //   - Se anade el tipo RECTANGULAR: sin bloques (una pared a inglete no
-    //     se puede representar estirando en X un bloque de extremos siempre
-    //     perpendiculares), con esquinas a inglete -no curvas- solo a 90
-    //     grados, y una etiqueta de texto "AnchoxAlto" en cada tramo (en vez
-    //     del atributo de bloque que usa el circular, ya que no hay bloque).
+    //   - Se anade el tipo RECTANGULAR: sin bloques de pared (una pared a
+    //     inglete no se puede representar estirando en X un bloque de
+    //     extremos siempre perpendiculares), con esquinas a inglete -no
+    //     curvas- a los mismos angulos normalizados que el circular (no solo
+    //     90). El rotulo de cada tramo, en cambio, si es un bloque
+    //     (CVENT_ROTULO_RECT) con sus atributos ANCHO/ALTO/LARGO, igual que
+    //     en circular.
     //
     // CVENT  - traza un conducto nuevo desde cero, punto a punto. Primero
     //          pregunta el tipo (Circular/Rectangular).
@@ -48,12 +50,10 @@ namespace ConductosPlugin
         public const double TransitionFactor = 2.5;
         public const double TransitionMinFactor = 0.5;
 
-        // Incremento de angulo de giro admitido en circular (multiplos de 15, catalogo
-        // SMACNA); en rectangular solo se admite el giro a escuadra -vease
-        // DuctRunner.TraceDuctRun, que pasa 90 como paso para que RoundTo solo pueda
-        // dar 0 o 90-. Tope maximo (grados), igual para ambos tipos.
+        // Incremento de angulo de giro admitido (multiplos de 15, catalogo SMACNA),
+        // igual en circular y rectangular -vease DuctRunner.TraceDuctRun-. Tope
+        // maximo (grados), tambien igual para ambos tipos.
         public const double AngleStepCircular = 15.0;
-        public const double AngleStepRectangular = 90.0;
         public const double AngleMax = 90.0;
 
         // Por debajo de este angulo (grados) un giro se considera "recto", sin codo.
@@ -380,10 +380,17 @@ namespace ConductosPlugin
             double margin = ancho / 2.0 + textHeight;
             var pos = new Point2d(mid.X + perp.X * margin, mid.Y + perp.Y * margin);
 
+            // Igual que cualquier rotulo de texto en CAD: si el tramo apunta hacia la
+            // mitad "de vuelta" (mas de 90 grados respecto a la horizontal), el texto
+            // saldria boca abajo o al reves. Se gira 180 grados para que siempre se lea
+            // de izquierda a derecha.
+            double rot = GeometryUtil.VectorAngle(dir);
+            if (Math.Abs(rot) > Math.PI / 2.0) rot = GeometryUtil.NormPi(rot + Math.PI);
+
             ObjectId id = EnsureLabelBlock(tr, db, tipo);
             var br = new BlockReference(new Point3d(pos.X, pos.Y, 0), id)
             {
-                Rotation = GeometryUtil.VectorAngle(dir),
+                Rotation = rot,
                 ScaleFactors = new Scale3d(textHeight, textHeight, 1.0),
                 Layer = CventConfig.WallLayer,
             };
@@ -778,8 +785,13 @@ namespace ConductosPlugin
             // angulo. El rotulo de cada tramo (bloque CVENT_ROTULO_CIRC/RECT, con
             // sus atributos ANCHO/ALTO/LARGO) se inserta siempre, aparte de las
             // paredes -bloque o lineas sueltas, segun el tipo-, al cerrar cada pieza.
+            // Los angulos normalizados (multiplos de 15, hasta 90) son los mismos en
+            // circular y rectangular: en circular fijan que bloque de codo curvo se
+            // usa, en rectangular solo afectan al angulo del inglete de la esquina
+            // (ProcessNextPiece ya resuelve cualquier angulo por interseccion de
+            // paredes, no solo 90).
             bool useBlocks = tipo == "Circular";
-            double angleStep = tipo == "Circular" ? CventConfig.AngleStepCircular : CventConfig.AngleStepRectangular;
+            double angleStep = CventConfig.AngleStepCircular;
             string dimKeyword = tipo == "Circular" ? "Diametro" : "Ancho";
 
             double? pendDiam = null;
@@ -833,9 +845,7 @@ namespace ConductosPlugin
                     {
                         restrictAngles = !restrictAngles;
                         ed.WriteMessage(restrictAngles
-                            ? (tipo == "Circular"
-                                ? $"\n[{cmdTag}] Giros restringidos a multiplos de 15 grados."
-                                : $"\n[{cmdTag}] Giros restringidos a 90 grados (esquina a inglete).")
+                            ? $"\n[{cmdTag}] Giros restringidos a multiplos de 15 grados (maximo 90)."
                             : $"\n[{cmdTag}] Giros libres (sin restriccion de angulo).");
                     }
                     else if (ppr.StringResult == "Salir")
@@ -998,9 +1008,7 @@ namespace ConductosPlugin
             if (pprFirst.Status != PromptStatus.OK) { ed.WriteMessage("\n[CVENT] Cancelado."); return; }
             Point2d p0 = new Point2d(pprFirst.Value.X, pprFirst.Value.Y);
 
-            ed.WriteMessage(tipo == "Circular"
-                ? "\n[CVENT] Giros restringidos a multiplos de 15 grados (maximo 90). Escribe \"Libre\" para alternar."
-                : "\n[CVENT] Giros restringidos a 90 grados (esquina a inglete). Escribe \"Libre\" para alternar.");
+            ed.WriteMessage("\n[CVENT] Giros restringidos a multiplos de 15 grados (maximo 90). Escribe \"Libre\" para alternar.");
 
             DuctRunner.TraceDuctRun(db, ed, tipo, diam, alto, textHeight, p0, null, null, true, "CVENT");
         }
