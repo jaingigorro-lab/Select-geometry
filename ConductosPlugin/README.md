@@ -101,6 +101,27 @@ transiciones, sin ninguna geometría de codo aparte. El rótulo, en cambio,
 **siempre** es un bloque (`CVENT_ROTULO_*`), tanto en circular como en
 rectangular.
 
+### Importante al volver a probar tras un cambio: un bloque ya existente en tu dwg se queda con su geometría VIEJA
+
+Si vienes reutilizando el **mismo** archivo `.dwg` de pruebas entre una versión
+del plugin y la siguiente (lo normal al iterar), ten en cuenta que un bloque
+como `CVENT_ROTULO_RECT` o `CVENT_CODO_A90` **ya existe** en ese dwg desde la
+primera vez que lo usaste — y AutoCAD no sabe que el código que lo generó ha
+cambiado. Por eso, desde esta versión, el plugin lleva un control por
+**sesión de AutoCAD** (`BlockFactory._rebuiltThisSession`): la primera vez que
+hace falta un bloque en la sesión actual, se reconstruye con la geometría del
+código que tengas cargado ahora mismo, aunque ya existiera (con geometría
+antigua) en el dwg; a partir de ahí, dentro de esa misma sesión, se reutiliza
+sin volver a tocarlo (para no rehacer el mismo trabajo en cada clic).
+
+En la práctica, esto significa que **basta con seguir la rutina de siempre**
+—cerrar y volver a abrir AutoCAD antes de cada `NETLOAD` de una DLL nueva—
+para que los bloques se pongan al día solos; no hace falta purgarlos ni
+borrar el dwg. Si alguna vez pruebas una DLL nueva **sin** reiniciar AutoCAD
+(recargando con `NETLOAD` en la misma sesión), los bloques que ya se
+reconstruyeron en esa sesión NO se volverán a tocar aunque el código haya
+cambiado — de ahí la importancia de reiniciar AutoCAD en cada prueba.
+
 ### Por qué el rótulo es un bloque APARTE, no un atributo del tramo recto
 
 Los bloques de tramo recto/reducción se insertan con `ScaleFactors` **no

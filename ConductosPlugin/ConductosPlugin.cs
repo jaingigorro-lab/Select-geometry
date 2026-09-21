@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Colors;
@@ -174,27 +175,40 @@ namespace ConductosPlugin
         public static string ReductionBlockName(double d1, double d2) => $"CVENT_REDUCCION_D{Tag(d1)}_D{Tag(d2)}";
         public static string ElbowBlockName(double angleDegAbs) => $"CVENT_CODO_A{Tag(Math.Round(angleDegAbs / CventConfig.AngleStepCircular) * CventConfig.AngleStepCircular)}";
 
-        private static bool HasContent(BlockTableRecord btr)
-        {
-            foreach (ObjectId id in btr) return true;
-            return false;
-        }
+        /// <summary>Nombres de bloque ya reconstruidos durante esta sesion de AutoCAD
+        /// (desde que se cargo la DLL con NETLOAD) -un dwg de pruebas reutilizado
+        /// entre sesiones puede llevar una version VIEJA de un bloque con el mismo
+        /// nombre (de una version anterior del plugin); sin este control, un bloque
+        /// que ya "existe con contenido" en ese dwg se daba por bueno tal cual, y un
+        /// cambio de geometria en el codigo no se veia nunca reflejado hasta borrar
+        /// el bloque a mano. Al arrancar una sesion nueva de AutoCAD (recomendado
+        /// antes de cada prueba) este set esta vacio, asi que cada bloque se
+        /// reconstruye una vez, la primera vez que hace falta en esa sesion, sea cual
+        /// sea su contenido previo en el dwg.</summary>
+        private static readonly HashSet<string> _rebuiltThisSession = new HashSet<string>();
 
-        /// <summary>Da de alta el bloque "name" si no existe (o lo deja listo para
-        /// reconstruir si existia pero vacio, de un intento anterior fallido).
-        /// Devuelve null si ya existia CON contenido -no hace falta reconstruirlo-.</summary>
+        /// <summary>Da de alta el bloque "name" si no existe. Si ya existe pero no se
+        /// ha reconstruido todavia en esta sesion (vease _rebuiltThisSession), borra
+        /// su contenido y lo deja listo para reconstruirlo con la geometria actual.
+        /// Devuelve null solo si ya se reconstruyo en esta sesion -no hace falta
+        /// volver a dibujarlo-.</summary>
         private static BlockTableRecord GetOrCreateEmptyBlock(Transaction tr, Database db, string name)
         {
             var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
             if (bt.Has(name))
             {
+                if (_rebuiltThisSession.Contains(name)) return null;
                 var existing = (BlockTableRecord)tr.GetObject(bt[name], OpenMode.ForWrite);
-                return HasContent(existing) ? null : existing;
+                foreach (ObjectId id in existing)
+                    ((Entity)tr.GetObject(id, OpenMode.ForWrite)).Erase();
+                _rebuiltThisSession.Add(name);
+                return existing;
             }
             bt.UpgradeOpen();
             var btr = new BlockTableRecord { Name = name };
             bt.Add(btr);
             tr.AddNewlyCreatedDBObject(btr, true);
+            _rebuiltThisSession.Add(name);
             return btr;
         }
 
