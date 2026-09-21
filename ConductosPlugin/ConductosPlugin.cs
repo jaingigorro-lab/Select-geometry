@@ -233,8 +233,9 @@ namespace ConductosPlugin
         /// cada AttributeDefinition no constante de su definicion (br debe estar ya
         /// insertado y con BlockTransform valido), con el valor de LARGO ya puesto a
         /// la longitud real de esta instancia.</summary>
-        private static void PopulateAttributes(Transaction tr, BlockReference br, ObjectId blockDefId, double length)
+        private static void PopulateAttributes(Transaction tr, BlockReference br, ObjectId blockDefId, double length, double diameter)
         {
+            double h = Math.Max(diameter * 0.2, 1.0);
             var btr = (BlockTableRecord)tr.GetObject(blockDefId, OpenMode.ForRead);
             foreach (ObjectId defId in btr)
             {
@@ -243,6 +244,13 @@ namespace ConductosPlugin
                 {
                     var attRef = new AttributeReference();
                     attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
+                    // SetAttributeFromBlock no calcula bien Height/WidthFactor cuando
+                    // el bloque tiene escala NO uniforme (aqui X=longitud del tramo,
+                    // Y=1 fijo) -sale un texto gigantesco, proporcional a la
+                    // longitud-. Se fija a mano, proporcional al diametro (fijo por
+                    // bloque, no al ScaleFactors de esta instancia).
+                    attRef.Height = h;
+                    attRef.WidthFactor = 1.0;
                     attRef.TextString = string.Equals(attDef.Tag, "LARGO", StringComparison.OrdinalIgnoreCase)
                         ? length.ToString("0")
                         : attDef.TextString;
@@ -257,8 +265,9 @@ namespace ConductosPlugin
         /// geometria de sus atributos a partir del nuevo BlockTransform y actualiza
         /// el valor de LARGO a la nueva longitud. ANCHO no cambia (el diametro es
         /// fijo por bloque).</summary>
-        public static void ResyncAttributesAfterRescale(Transaction tr, BlockReference br, double newLength)
+        public static void ResyncAttributesAfterRescale(Transaction tr, BlockReference br, double newLength, double diameter)
         {
+            double h = Math.Max(diameter * 0.2, 1.0);
             var btr = (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
             var defsByTag = new Dictionary<string, AttributeDefinition>(StringComparer.OrdinalIgnoreCase);
             foreach (ObjectId defId in btr)
@@ -272,6 +281,8 @@ namespace ConductosPlugin
                 var attRef = (AttributeReference)tr.GetObject(attId, OpenMode.ForWrite);
                 if (defsByTag.TryGetValue(attRef.Tag, out AttributeDefinition attDef))
                     attRef.SetAttributeFromBlock(attDef, br.BlockTransform);
+                attRef.Height = h;
+                attRef.WidthFactor = 1.0;
                 if (string.Equals(attRef.Tag, "LARGO", StringComparison.OrdinalIgnoreCase))
                     attRef.TextString = newLength.ToString("0");
             }
@@ -336,7 +347,7 @@ namespace ConductosPlugin
             owner.AppendEntity(br);
             tr.AddNewlyCreatedDBObject(br, true);
 
-            PopulateAttributes(tr, br, id, length);
+            PopulateAttributes(tr, br, id, length, diameter);
             return br;
         }
 
@@ -518,7 +529,7 @@ namespace ConductosPlugin
             if (newLength < 1e-6) newLength = 1e-6;
             br.ScaleFactors = new Scale3d(newLength, br.ScaleFactors.Y, br.ScaleFactors.Z);
 
-            BlockFactory.ResyncAttributesAfterRescale(tr, br, newLength);
+            BlockFactory.ResyncAttributesAfterRescale(tr, br, newLength, piece.Radius * 2.0);
         }
 
         /// <summary>Codo curvo entre el final de la pieza pendiente y el inicio de la
