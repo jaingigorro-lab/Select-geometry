@@ -108,7 +108,9 @@ El rótulo se orienta con la dirección del tramo, pero si esa dirección cae en
 la mitad "de vuelta" (más de 90° respecto a la horizontal) el atributo se gira
 180° **en su propia rotación local** (no la del bloque, que sigue apuntando a
 la dirección real del tramo — así la pared no se ve afectada), para que el
-texto nunca salga boca abajo o al revés.
+texto nunca salga boca abajo o al revés. Cada atributo (y el separador "x" de
+rectangular) usa justificación **Medio Centro** (`AttachmentPoint.MiddleCenter`),
+centrado sobre su propio punto de inserción.
 
 ## Si la sección de un codo sigue apareciendo en el dibujo: revisa ATTDISP
 

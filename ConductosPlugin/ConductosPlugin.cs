@@ -330,14 +330,21 @@ namespace ConductosPlugin
             {
                 double dx = localDx * Math.Cos(localRot) - localDy * Math.Sin(localRot);
                 double dy = localDx * Math.Sin(localRot) + localDy * Math.Cos(localRot);
+                var pos = new Point3d(localCenter.X + dx, localCenter.Y + dy, 0);
                 var attDef = new AttributeDefinition
                 {
-                    Position = new Point3d(localCenter.X + dx, localCenter.Y + dy, 0),
+                    Position = pos,
                     Height = textHeight,
                     Tag = tag,
                     Prompt = prompt,
                     TextString = text,
-                    Justify = AttachmentPoint.BaseLeft,
+                    // Justify DEBE fijarse antes que AlignmentPoint -al reves dispara
+                    // eNotApplicable-. Para cualquier justificacion que no sea
+                    // BaseLeft (aqui, MiddleCenter) hace falta ademas fijar
+                    // AlignmentPoint -sin el, el texto se sigue alineando como si
+                    // fuera BaseLeft pese al Justify-.
+                    Justify = AttachmentPoint.MiddleCenter,
+                    AlignmentPoint = pos,
                     Rotation = localRot,
                     Layer = "0",
                     Invisible = forceInvisible || invisible,
@@ -366,10 +373,13 @@ namespace ConductosPlugin
                     double sepLocalX = textHeight * 3.0;
                     double dx = sepLocalX * Math.Cos(localRot);
                     double dy = sepLocalX * Math.Sin(localRot);
+                    var sepPos = new Point3d(localCenter.X + dx, localCenter.Y + dy, 0);
                     var dbText = new DBText
                     {
-                        Position = new Point3d(localCenter.X + dx, localCenter.Y + dy, 0),
+                        Position = sepPos,
                         Height = textHeight,
+                        Justify = AttachmentPoint.MiddleCenter,
+                        AlignmentPoint = sepPos,
                         Rotation = localRot,
                         TextString = "x",
                         Layer = "0",
