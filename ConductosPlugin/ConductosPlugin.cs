@@ -171,12 +171,23 @@ namespace ConductosPlugin
         /// plugin sin serlo. CVENT y CVENTT llaman a esto al arrancar para que la
         /// visibilidad de cada rotulo dependa solo de su propio flag, como se
         /// espera. Es solo una comodidad -si SetSystemVariable falla por lo que sea
-        /// no debe tirar abajo el comando entero: en el peor caso, queda pendiente
-        /// de revisar a mano con el comando ATTDISP (opcion Normal).</summary>
-        public static void EnsureAttDispNormal()
+        /// no debe tirar abajo el comando entero-, pero a diferencia de antes AVISA
+        /// por la linea de comandos si falla (o si ATTDISP no queda en Normal), en
+        /// vez de fallar en silencio: asi se puede saber con seguridad si el
+        /// problema es este o es otra cosa.</summary>
+        public static void EnsureAttDispNormal(Editor ed)
         {
-            try { AcApp.SetSystemVariable("ATTDISP", (short)1); }
-            catch (Autodesk.AutoCAD.Runtime.Exception) { }
+            try
+            {
+                AcApp.SetSystemVariable("ATTDISP", (short)1);
+                object current = AcApp.GetSystemVariable("ATTDISP");
+                if (Convert.ToInt32(current) != 1)
+                    ed.WriteMessage($"\n[AVISO] ATTDISP quedo en {current}, no en 1 (Normal): los atributos invisibles (seccion de un codo) pueden seguir viendose. Ejecuta el comando ATTDISP -> Normal a mano.");
+            }
+            catch (Autodesk.AutoCAD.Runtime.Exception ex)
+            {
+                ed.WriteMessage($"\n[AVISO] No se pudo ajustar ATTDISP automaticamente ({ex.Message}). Ejecuta el comando ATTDISP -> Normal a mano si ves texto en los codos.");
+            }
         }
     }
 
@@ -782,7 +793,7 @@ namespace ConductosPlugin
             Database db = doc.Database;
             Editor ed = doc.Editor;
 
-            DrawingUtil.EnsureAttDispNormal();
+            DrawingUtil.EnsureAttDispNormal(ed);
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 DrawingUtil.EnsureLayer(tr, db, CventConfig.WallLayer, CventConfig.WallColor);
@@ -873,7 +884,7 @@ namespace ConductosPlugin
             Database db = doc.Database;
             Editor ed = doc.Editor;
 
-            DrawingUtil.EnsureAttDispNormal();
+            DrawingUtil.EnsureAttDispNormal(ed);
             using (Transaction tr0 = db.TransactionManager.StartTransaction())
             {
                 DrawingUtil.EnsureLayer(tr0, db, CventConfig.WallLayer, CventConfig.WallColor);
