@@ -55,6 +55,23 @@ Cada combinación de medidas es un bloque propio (por ejemplo `ARMESQ_B_2.00x1.6
 
 ![Armarios de esquina de ejemplo](ArmarioEsquina_vista_previa.png)
 
+## Mesa de escritorio en L con silla y complementos (`MesaEsquina.lsp`)
+
+Dibuja en planta una mesa en L con el rincón interior curvo o recto, pasacables, el puesto de trabajo completo (pantalla con su pie, teclado, ratón a la derecha y silla operativa con ruedas), lámpara de mesa y cajonera bajo el tablero en discontinua. La discontinua está dibujada a trazos, así que se ve igual con cualquier escala de tipo de línea. Trabaja en metros y se escala sola en dibujos en centímetros o milímetros.
+
+1. Carga el archivo con `APPLOAD`.
+2. `MESAESQ`: pincha la esquina exterior de la L y el final de cada tramo (o teclea el largo con la dirección del cursor). Luego da el fondo de cada tramo (0,60 por defecto) y las opciones:
+   - **Puesto de trabajo**: en la *Esquina* (silla en el rincón, mirando a la esquina), en el *Primero* o en el *Segundo* tramo.
+   - **Rincón interior**: *Curvo* (radio de hasta 40 cm, según el espacio) o *Recto*.
+   - **Silla**: *Sí* o *No*.
+3. `MESAESQMOD`: selecciona una mesa ya insertada y cambia largos, fondos u opciones. Se redibuja entera sin moverse.
+
+Da igual el orden en que pinches los tramos: si el segundo queda a la derecha del primero, el comando los intercambia para que el bloque no salga en simetría y el ratón siga a la derecha. Cada combinación de medidas y opciones es un bloque propio (por ejemplo `MESAESQ_1.70x1.60_0.60x0.60_CES`), y las medidas quedan guardadas en la inserción para `MESAESQMOD`.
+
+`MesaEsquina_ejemplo.dxf` trae el despacho de la captura con medidas aproximadas (2,65 x 2,92 m, deducidas de la mesa de 160 x 80 que había dibujada) y la mesa en L colocada como en el croquis: un tramo de 1,60 m perpendicular a la ventana y otro de 1,70 m junto a la ventana hasta la pared derecha, con el puesto en el rincón. Al lado hay dos variantes con el puesto en cada tramo.
+
+![Mesa en L en el despacho](MesaEsquina_vista_previa.png)
+
 ## Regenerar o modificar
 
 Las medidas están en `generar_bloques.py`. Para volver a generar el DXF:
