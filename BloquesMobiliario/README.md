@@ -72,6 +72,20 @@ Da igual el orden en que pinches los tramos: si el segundo queda a la derecha de
 
 ![Mesa en L en el despacho](MesaEsquina_vista_previa.png)
 
+## Plato de ducha a medida del hueco (`PlatoDucha.lsp`)
+
+Dibuja en planta un plato de ducha que ocupa justo el hueco que pinches: borde, reborde interior con las esquinas redondeadas y desagüe centrado, de válvula junto a un lado o lineal a lo largo de un lado, con sus líneas de pendiente. La escala (m, cm o mm) se deduce del tamaño del hueco, así que funciona aunque `INSUNITS` no coincida con las unidades en que dibujas.
+
+1. Carga el archivo con `APPLOAD`.
+2. `PLATODUCHA`: pincha dos esquinas opuestas del hueco, en las caras interiores de las paredes y del tabique (usa la referencia a objetos *Punto final* o *Intersección*). Después pincha cerca del lado donde quieres el desagüe, o pulsa Intro para dejarlo centrado, y elige *Valvula* o *Lineal*.
+3. `PLATODUCHAMOD`: selecciona un plato ya insertado y cambia el ancho, el largo, el tipo de desagüe o su lado. La esquina de inserción no se mueve.
+
+Cada combinación es un bloque propio (por ejemplo `PLATODUCHA_0.879x1.595_LA`: L = lineal, V = válvula, C = centrado; A, B, I o D = lado de arriba, abajo, izquierda o derecha) y las medidas quedan guardadas en la inserción para `PLATODUCHAMOD`. Los lados de 0,60 a 3,00 m son válidos.
+
+`PlatoDucha_ejemplo.dxf` trae la zona de ducha del baño de la captura, con medidas aproximadas deducidas del tabique de 6,9 cm: un hueco de unos 0,88 x 1,59 m cerrado a la derecha por el murete, el tabique y la entrada. El plato está insertado con `PLATODUCHA` y lleva el desagüe lineal en el fondo, lejos de la entrada. Al lado hay dos variantes, con válvula y con el desagüe centrado.
+
+![Plato de ducha en el baño](PlatoDucha_vista_previa.png)
+
 ## Regenerar o modificar
 
 Las medidas están en `generar_bloques.py`. Para volver a generar el DXF:
