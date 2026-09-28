@@ -41,6 +41,20 @@
 
 Los armarios empotrados incluyen tapajuntas, premarco, cerco, casco, divisiones, puertas con su barrido (o correderas con sus flechas), barra y perchas. `DETALLE_ARMARIO_JAMBA` es la sección horizontal de la jamba a tamaño real, con rótulos de 12,5 mm (2,5 mm impresos a E 1:5).
 
+## Armario empotrado en esquina con medidas editables (`ArmarioEsquina.lsp`)
+
+Dibuja en planta un armario empotrado en esquina de 90° con todo el detalle: casco (traseras, costados y divisiones), frente (tapajuntas, premarco, cerco, poste de rincón y regletas), puertas batientes con su barrido o correderas en dos guías, barra de colgar en L en el rincón y perchas. Trabaja en metros; si el dibujo tiene las unidades en centímetros o milímetros (`INSUNITS`), se escala solo.
+
+1. Carga el archivo con `APPLOAD` (o arrástralo a la ventana de AutoCAD).
+2. `ARMESQ`: pincha la esquina interior de las paredes y, después, el final del armario en cada pared (o mueve el cursor en esa dirección y teclea el largo). Luego indica el fondo (0,60 por defecto) y el tipo de puertas. Si la segunda pared queda a la derecha de la primera, el armario sale simétrico.
+3. `ARMESQMOD`: selecciona un armario ya insertado y cambia el largo de cada lado, el fondo o las puertas. Se redibuja entero, sin mover la inserción.
+
+Cada combinación de medidas es un bloque propio (por ejemplo `ARMESQ_B_2.00x1.60x0.60`: B = batientes, C = correderas; largo en la primera pared x largo en la segunda x fondo). Las medidas se guardan en la inserción, por eso `ARMESQMOD` las recupera. Las puertas se reparten solas: hojas batientes de 60 cm como máximo (la del rincón abre hacia fuera del rincón para no chocar con el otro frente) o correderas de 1 m como máximo.
+
+`ArmarioEsquina_ejemplo.dxf` trae dos armarios ya dibujados en metros (2,00 x 1,60 batiente y 2,40 x 2,00 corredero). Con el LISP cargado, `ARMESQMOD` también funciona sobre ellos.
+
+![Armarios de esquina de ejemplo](ArmarioEsquina_vista_previa.png)
+
 ## Regenerar o modificar
 
 Las medidas están en `generar_bloques.py`. Para volver a generar el DXF:
