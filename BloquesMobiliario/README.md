@@ -86,6 +86,22 @@ Cada combinación es un bloque propio (por ejemplo `PLATODUCHA_0.879x1.595_LA`: 
 
 ![Plato de ducha en el baño](PlatoDucha_vista_previa.png)
 
+## Puerta corredera empotrada de una o dos hojas (`PuertaCorredera.lsp`)
+
+Dibuja en planta una corredera de cajón como la del vestidor: el cajón dentro del tabique, la hoja recogida en discontinua, el canto que asoma por la boca, el recorrido de cierre en discontinua y la flecha de apertura. Con dos hojas lleva un cajón a cada lado y el paso queda en el centro del tramo. Las discontinuas están dibujadas a trazos, así que se ven con cualquier escala de tipo de línea, y la escala (m, cm o mm) se deduce del largo del tramo.
+
+1. Carga el archivo con `APPLOAD`.
+2. `CORREDERA`: pincha los dos extremos del tramo de pared en una de sus caras (con *Punto final*) y después un punto en la otra cara, que da el grosor. Elige *Una* o *Dos* hojas y el ancho de paso; por defecto, el mayor que cabe en el tramo. La puerta queda centrada en el tramo y las flechas salen del lado de la cara que pinchaste. Con una hoja, el cajón va en el lado del primer punto.
+3. `CORREDERAMOD`: selecciona una corredera ya insertada y cambia el paso, el grosor, el número de hojas o el lado del cajón. Sigue centrada en el mismo punto.
+
+Con dos hojas el tramo se reparte en cajón, paso y cajón. Cada hoja mide medio paso más 4 cm, porque al cerrar se queda 4 cm dentro del cajón, y al abrir asoma 3 cm por la boca. En un muro de 1,30 m sale un paso de 0,63 m con dos hojas de 0,355 m y cajones de 0,335 m. Cada combinación es un bloque propio (por ejemplo `CORREDERA_2H_0.630x0.069`: dos hojas, paso x grosor; con una hoja se añade `_I` o `_D`, el lado del cajón). El bloque no recorta las líneas del muro: si quieres el paso abierto, recórtalas tú.
+
+Si la pared mide menos de 9 cm, el comando avisa: los cajones de corredera suelen pedir un tabique terminado de unos 10 cm.
+
+`PuertaCorredera_ejemplo.dxf` trae la esquina del vestidor de la captura con medidas aproximadas (tabiques de 6,9 cm y muro en diagonal de 1,30 m): la corredera de una hoja como estaba y la de dos hojas con el paso en el centro, las dos insertadas con `CORREDERA`.
+
+![Corredera de una y de dos hojas en el vestidor](PuertaCorredera_vista_previa.png)
+
 ## Regenerar o modificar
 
 Las medidas están en `generar_bloques.py`. Para volver a generar el DXF:
