@@ -68,6 +68,7 @@
 (setq *areas-total* 0.0)        ; suma de las areas rotuladas (m2)
 (setq *areas-count* 0)          ; cuartos rotulados
 (setq *areas-odd* 0)            ; cuartos con una superficie sospechosa
+(setq *areas-saved* nil)        ; variables de sistema a restaurar (ver areas-restore-vars)
 
 ;; --- Utilidades ---
 
@@ -238,7 +239,7 @@
   (setq pts '())
   (setq i 0)
   (while (< i n)
-    (setq pts (cons (areas-pt2d (vlax-curve-getPointAtParam ent i)) pts))
+    (setq pts (cons (areas-pt2d (vlax-curve-getPointAtParam ent (float i))) pts))
     (if (> (abs (nth i bulges)) 1e-9)
       (progn
         (setq j 1)
@@ -501,28 +502,47 @@
 
 ;; --- Contorno a partir de un punto interior (sin polilinea previa) ---
 
+;; Lanza -BOUNDARY en el punto pt. Es una funcion propia, y NO
+;; (vl-catch-all-apply 'command ...), porque AutoCAD no admite COMMAND
+;; como funcion a aplicar de forma indirecta ("funcion erronea: COMMAND").
+(defun areas-run-boundary (pt)
+  (command "_.-BOUNDARY" pt "")
+)
+
+;; Devuelve a su valor las variables de sistema que areas-boundary-at
+;; cambia. Tambien la llama *error*, por si algo falla a mitad.
+(defun areas-restore-vars ( / v)
+  (if *areas-saved*
+    (progn
+      (foreach v *areas-saved*
+        (vl-catch-all-apply 'setvar (list (car v) (cadr v)))
+      )
+      (setq *areas-saved* nil)
+    )
+  )
+)
+
 ;; Detecta el contorno del cuarto que rodea al punto "pt" (en UCS) con
 ;; -BOUNDARY, lee el resultado y BORRA lo que el comando haya creado.
 ;; Devuelve (puntos area-en-unidades-de-dibujo^2), o nil si no ha
 ;; podido. Si hay islas (columnas, mobiliario cerrado...) se queda con
 ;; el contorno exterior, que es el de mayor area. OSMODE se apaga
 ;; mientras tanto para que el punto no salte a un snap.
-(defun areas-boundary-at (pt / os ce hb last0 e news best bestA a pts res)
-  (setq os (getvar "OSMODE"))
-  (setq ce (getvar "CMDECHO"))
+(defun areas-boundary-at (pt / hb last0 e news best bestA a pts res)
   ;; HPBOUND decide si BOUNDARY crea polilineas (1) o regiones (0); se
   ;; fuerza a polilinea mientras dura (si esta version no la tiene, se ignora).
   (setq hb (vl-catch-all-apply 'getvar (list "HPBOUND")))
   (if (vl-catch-all-error-p hb) (setq hb nil))
+  (setq *areas-saved* (list (list "OSMODE" (getvar "OSMODE"))
+                            (list "CMDECHO" (getvar "CMDECHO"))))
+  (if hb (setq *areas-saved* (cons (list "HPBOUND" hb) *areas-saved*)))
   (setvar "OSMODE" 0)
   (setvar "CMDECHO" 0)
   (if hb (setvar "HPBOUND" 1))
   (setq last0 (entlast))
-  (setq res (vl-catch-all-apply 'command (list "_.-BOUNDARY" pt "")))
+  (setq res (vl-catch-all-apply 'areas-run-boundary (list pt)))
   (if (> (getvar "CMDACTIVE") 0) (command))
-  (if hb (setvar "HPBOUND" hb))
-  (setvar "OSMODE" os)
-  (setvar "CMDECHO" ce)
+  (areas-restore-vars)
   ;; Entidades nuevas creadas por el comando.
   (setq news '())
   (setq e (if last0 (entnext last0) (entnext)))
@@ -696,6 +716,7 @@
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (defun *error* (msg)
     (vl-catch-all-apply 'vla-EndUndoMark (list doc))
+    (areas-restore-vars)
     (redraw)
     (if (and msg (not (wcmatch (strcase msg) "*CANCEL*,*QUIT*,*EXIT*")))
       (princ (strcat "\n[AREACUARTOS] Error: " msg))
