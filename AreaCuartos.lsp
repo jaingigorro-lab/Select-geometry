@@ -48,17 +48,33 @@
 ;;       Texto - texto fijo, sin vinculo con la polilinea.
 ;;     Opcionalmente pide el nombre de cada cuarto (resaltandolo).
 ;;
+;;   Vincular (por defecto ACTIVADO): al pulsar dentro de un cuarto o dar
+;;     sus esquinas, el contorno se CONSERVA como una polilinea oculta (en
+;;     la capa AREAS_CONTORNO, congelada y no imprimible, para que no
+;;     estorbe) y el rotulo del area es un CAMPO vinculado a ella, igual
+;;     que con las polilineas existentes: si luego se modifica el contorno
+;;     (con pinzamientos, STRETCH...), el area se actualiza sola (REGEN o
+;;     ACTUALIZARCAMPO / UPDATEFIELD). Si se desactiva (opcion Vincular),
+;;     no se deja ninguna polilinea y el rotulo es texto fijo. Cuando se
+;;     rotula de nuevo un cuarto, su contorno antiguo se retira solo.
+;;
 ;;   Tabla: la opcion Tabla (o la pregunta final al terminar con Intro)
-;;     crea una TABLA de AutoCAD con una fila por cuarto (ZONA y
-;;     SUPERFICIE en m2) y una fila final TOTAL con la suma. Se pide el
-;;     punto de insercion (esquina superior izquierda). Recoge los
-;;     cuartos rotulados que SIGUEN en el dibujo, aunque se hayan
-;;     rotulado en ejecuciones distintas: si se repite un cuarto, o se
-;;     borra su rotulo, esa fila desaparece sola. La tabla es una
-;;     instantanea: si despues cambia un cuarto, se vuelve a crear. Va
-;;     en la capa AREAS_TABLA, con el tamano de texto de los rotulos.
-;;     Si AutoCAD no admitiera crear la tabla, se dibuja una equivalente
-;;     con lineas y textos.
+;;     crea una tabla con una fila por cuarto (ZONA y SUPERFICIE en m2) y
+;;     una fila final TOTAL. Se pide el punto de insercion (esquina
+;;     superior izquierda). Recoge los cuartos rotulados que SIGUEN en el
+;;     dibujo, aunque se hayan rotulado en ejecuciones distintas: si se
+;;     repite un cuarto, o se borra su rotulo, esa fila desaparece sola.
+;;     Esta SINCRONIZADA: es una rejilla de lineas y textos (capa
+;;     AREAS_TABLA) donde cada superficie es un CAMPO vinculado a la
+;;     polilinea de su cuarto, y el TOTAL es un campo de suma de esos
+;;     mismos campos; asi, si cambia un cuarto, sus rotulos, su fila y el
+;;     total se actualizan juntos (REGEN o ACTUALIZARCAMPO / UPDATEFIELD).
+;;     Cada campo se comprueba al crearse; los cuartos que no estan
+;;     vinculados a una polilinea (rotulos de texto fijo) entran como
+;;     numero fijo, y se avisa. Lo que NO se actualiza solo es el numero
+;;     de filas: si se anaden cuartos nuevos, se vuelve a crear la tabla.
+;;     La opcion Nativa del punto de insercion crea en su lugar una tabla
+;;     de AutoCAD con valores fijos.
 ;;
 ;;   Unidades: el area siempre se rotula en m2, y se convierte desde las
 ;;   unidades del dibujo (m, cm o mm). NO hay que configurarlas: se
@@ -86,6 +102,8 @@
 (setq *areas-unit-forced* nil)  ; unidades elegidas a mano (opcion Unidades); nil = detectar solas
 (setq *areas-height-user* nil)  ; altura de texto elegida a mano (unidades del dibujo); nil = automatica
 (setq *areas-confirm* T)        ; ensenar y confirmar el contorno detectado antes de rotular
+(setq *areas-link* T)           ; al pulsar dentro / esquinas: conservar el contorno (oculto) y vincular el rotulo con un CAMPO
+(setq *areas-contour-layer* "AREAS_CONTORNO")  ; capa (congelada, no imprimible) de los contornos conservados
 
 ;; Estado de UNA ejecucion del comando (se reinicia al empezar).
 (setq *areas-unit* nil)         ; unidades detectadas/fijadas: "m", "cm" o "mm"
@@ -95,8 +113,10 @@
 (setq *areas-saved* nil)        ; variables de sistema a restaurar (ver areas-restore-vars)
 (setq *areas-table-done* nil)   ; ya se ha creado la tabla en esta ejecucion
 (setq *areas-preview* nil)      ; contorno provisional dibujado en rojo (ename)
+(setq *areas-pending* nil)      ; contorno detectado/creado a la espera de quedar asociado a un rotulo (ename)
 
-;; Cuartos rotulados, para la tabla: lista de (nombre area-m2 ename-del-rotulo-de-area).
+;; Cuartos rotulados, para la tabla: lista de (nombre area-m2 ename-del-rotulo-de-area
+;; polilinea-vinculada-o-nil factor-a-m2).
 ;; Se conserva entre ejecuciones; solo cuentan los que siguen en el dibujo.
 (setq *areas-rooms* nil)
 (setq *areas-table-layer* "AREAS_TABLA")
@@ -389,15 +409,19 @@
   (if (vl-catch-all-error-p id) nil id)
 )
 
-;; Texto de un campo "Area de este objeto" en m2, seguido de " m2" (con
-;; el 2 en superindice, via \U+00B2 para no meter caracteres no ASCII
-;; en el archivo). El factor de conversion solo se anade si hace falta.
-(defun areas-field-string (id fac)
+;; Codigo de un campo "Area de este objeto" (solo el numero, en m2). El
+;; factor de conversion de unidades solo se anade si hace falta.
+(defun areas-field-code (id fac)
   (strcat "%<\\AcObjProp Object(%<\\_ObjId " id ">%).Area \\f \"%lu2%pr"
           (itoa *areas-precision*)
           (if (/= fac 1.0) (strcat "%ct8[" (rtos fac 2 8) "]") "")
-          "\">%"
-          " m\\U+00B2")
+          "\">%")
+)
+
+;; Texto de un campo de area seguido de " m2" (con el 2 en superindice,
+;; via \U+00B2 para no meter caracteres no ASCII en el archivo).
+(defun areas-field-string (id fac)
+  (strcat (areas-field-code id fac) " m\\U+00B2")
 )
 
 ;; Texto fijo "12.76 m2".
@@ -462,8 +486,9 @@
 ;; o nil = sin nombre) y "useField" si se quiere campo en vez de texto
 ;; fijo. Con nombre: el nombre va arriba y el area debajo, centrados
 ;; respecto al punto del cuarto; sin nombre, el area sola en el punto.
-;; Devuelve (area-m2 tipo-de-rotulo punto ename-del-rotulo-de-area), con
-;; tipo "campo" o "texto".
+;; Devuelve (area-m2 tipo-de-rotulo punto ename-del-rotulo-de-area
+;; polilinea-vinculada), con tipo "campo" o "texto" (la polilinea vinculada
+;; es nil si el rotulo es texto fijo).
 (defun areas-place (pts areaD fent name useField height
                     / fac areaM2 pt apt off id vlaObj obj en kind txt)
   (setq fac (areas-m2-factor))
@@ -511,7 +536,7 @@
   (if (/= kind "campo")
     (setq en (vlax-vla-object->ename (areas-add-mtext apt (areas-static-string areaM2) height)))
   )
-  (list areaM2 kind pt en)
+  (list areaM2 kind pt en (if (= kind "campo") fent nil))
 )
 
 ;; Rotula una polilinea cerrada ya existente. nil si no tiene area.
@@ -530,7 +555,9 @@
 (defun areas-record (res name)
   (setq *areas-total* (+ *areas-total* (car res)))
   (setq *areas-count* (1+ *areas-count*))
-  (setq *areas-rooms* (append *areas-rooms* (list (list name (car res) (nth 3 res)))))
+  (setq *areas-rooms* (append *areas-rooms*
+                              (list (list name (car res) (nth 3 res) (nth 4 res) (areas-m2-factor)))))
+  (areas-live-rooms)                                     ; poda los que ya no estan (y sus contornos huerfanos)
   (if (or (< (car res) 0.3) (> (car res) 3000.0))
     (setq *areas-odd* (1+ *areas-odd*))
   )
@@ -564,10 +591,11 @@
 )
 
 ;; Detecta el contorno del cuarto que rodea al punto "pt" (en UCS) con
-;; -BOUNDARY, lee el resultado y BORRA lo que el comando haya creado.
-;; Devuelve (puntos area-en-unidades-de-dibujo^2 islas-ignoradas), o nil
-;; si no ha podido. Si hay islas (columnas, mobiliario cerrado...) se
-;; queda con el contorno exterior, que es el de mayor area. OSMODE se apaga
+;; -BOUNDARY y lee el resultado (borrando las islas que haya creado).
+;; Devuelve (puntos area-en-unidades-de-dibujo^2 islas-ignoradas
+;; polilinea), o nil si no ha podido. Si hay islas (columnas, mobiliario
+;; cerrado...) se queda con el contorno exterior, que es el de mayor
+;; area; esa polilinea NO se borra: el que llama la adopta o la borra. OSMODE se apaga
 ;; mientras tanto para que el punto no salte a un snap.
 (defun areas-boundary-at (pt / hb last0 e news best bestA nPoly a pts res)
   ;; HPBOUND decide si BOUNDARY crea polilineas (1) o regiones (0); se
@@ -603,8 +631,67 @@
     )
   )
   (setq pts (if best (areas-room-points best) nil))
-  (foreach e news (entdel e))
-  (if (and pts (>= (length pts) 3)) (list pts bestA (1- nPoly)) nil)
+  ;; Se borra todo lo creado salvo el contorno exterior, que se CONSERVA
+  ;; (pendiente, hasta que se acepte o se descarte) para poder vincularle
+  ;; el rotulo con un campo.
+  (foreach e news (if (not (equal e best)) (entdel e)))
+  (if (and pts (>= (length pts) 3))
+    (progn
+      (setq *areas-pending* best)
+      (list pts bestA (1- nPoly) best)
+    )
+    (progn
+      (if best (entdel best))
+      nil
+    )
+  )
+)
+
+;; --- Contornos conservados (para vincular el rotulo con un campo) ---
+
+;; Capa de los contornos: CONGELADA (no estorban a la vista ni a -BOUNDARY
+;; cuando se vuelve a pulsar en un cuarto) y no imprimible. Los campos
+;; funcionan igual con la capa congelada.
+(defun areas-ensure-contour-layer ()
+  (if (not (tblsearch "LAYER" *areas-contour-layer*))
+    (entmake (list '(0 . "LAYER") '(100 . "AcDbSymbolTableRecord")
+                   '(100 . "AcDbLayerTableRecord")
+                   (cons 2 *areas-contour-layer*) '(70 . 1) '(62 . 8) '(6 . "Continuous") '(290 . 0)))
+  )
+  *areas-contour-layer*
+)
+
+;; True si la polilinea "en" esta en la capa de los contornos conservados.
+(defun areas-contour-p (en)
+  (= (cdr (assoc 8 (entget en))) *areas-contour-layer*)
+)
+
+;; Pasa una polilinea a la capa de contornos, por capa. T si lo consigue.
+(defun areas-adopt-contour (en / obj r1 r2)
+  (setq obj (vlax-ename->vla-object en))
+  (setq r1 (vl-catch-all-apply 'vla-put-Layer (list obj *areas-contour-layer*)))
+  (setq r2 (vl-catch-all-apply 'vla-put-Color (list obj 256)))
+  (and (not (vl-catch-all-error-p r1)) (not (vl-catch-all-error-p r2)))
+)
+
+;; Crea una polilinea cerrada con los puntos dados, en la capa de
+;; contornos. Devuelve su ename.
+(defun areas-make-contour (pts / data p)
+  (areas-ensure-contour-layer)
+  (setq data (list '(0 . "LWPOLYLINE") '(100 . "AcDbEntity") (cons 8 *areas-contour-layer*)
+                   '(100 . "AcDbPolyline") (cons 90 (length pts)) '(70 . 1)))
+  (foreach p pts
+    (setq data (append data (list (cons 10 (list (car p) (cadr p))))))
+  )
+  (entmakex data)
+)
+
+;; Borra el contorno pendiente (si sigue ahi). Tambien lo llama *error*.
+(defun areas-pending-clear ()
+  (if (and *areas-pending* (areas-alive-p *areas-pending*))
+    (entdel *areas-pending*)
+  )
+  (setq *areas-pending* nil)
 )
 
 ;; --- Vista previa del contorno detectado ---
@@ -683,7 +770,7 @@
 )
 
 ;; Rotula un cuarto a partir de las esquinas pulsadas a mano.
-(defun areas-do-corners ( / pts a name res)
+(defun areas-do-corners ( / pts a name res fent)
   (setq pts (areas-pick-corners))
   (cond
     ((< (length pts) 3)
@@ -697,8 +784,19 @@
           (areas-ensure-unit a)
           (princ (strcat "\n[AREACUARTOS] Area de las esquinas pulsadas: " (areas-bbox-text pts) ", area = "
                          (rtos (* a (areas-m2-factor)) 2 *areas-precision*) " m2."))
+          ;; Con Vincular, se crea el contorno (oculto) para que el rotulo sea un campo.
+          (setq fent nil)
+          (if *areas-link*
+            (progn
+              (setq fent (areas-make-contour pts))
+              (setq *areas-pending* fent)
+            )
+          )
           (setq name (areas-ask-name))
-          (setq res (areas-place pts a nil name nil (areas-text-height)))
+          (setq res (areas-place pts a fent name (if fent T nil) (areas-text-height)))
+          ;; Si el campo no ha podido crearse, el contorno no sirve de nada.
+          (if (and fent (/= (cadr res) "campo")) (entdel fent))
+          (setq *areas-pending* nil)
           (areas-record res name)
         )
       )
@@ -708,12 +806,13 @@
 
 ;; Rotula el cuarto en el que se ha pulsado: detecta su contorno y, si
 ;; no puede, pide las esquinas. Cada cuarto es un grupo de deshacer.
-(defun areas-do-click (pt doc / b areaM2 nIsl ans name res)
+(defun areas-do-click (pt doc / b best areaM2 nIsl ans name res fent)
   (vla-StartUndoMark doc)
   (setq b (areas-boundary-at pt))
   (if b
     (progn
       (areas-ensure-unit (cadr b))
+      (setq best (nth 3 b))
       (setq areaM2 (* (cadr b) (areas-m2-factor)))
       (setq nIsl (caddr b))
       ;; Se dice QUE contorno ha cogido y cuanto mide...
@@ -736,11 +835,28 @@
         )
       )
       (cond
-        ((= ans "No") (princ "\n[AREACUARTOS] Descartado: no se ha rotulado nada."))
-        ((= ans "Esquinas") (areas-do-corners))
+        ((= ans "No")
+          (areas-pending-clear)
+          (princ "\n[AREACUARTOS] Descartado: no se ha rotulado nada."))
+        ((= ans "Esquinas")
+          (areas-pending-clear)
+          (areas-do-corners))
         (T
+          ;; Con Vincular, el contorno detectado se CONSERVA (oculto, en su
+          ;; capa) y el rotulo es un campo vinculado a el; si no, se borra.
+          (setq fent nil)
+          (if *areas-link*
+            (progn
+              (areas-ensure-contour-layer)
+              (if (areas-adopt-contour best) (setq fent best))
+            )
+          )
+          (if (not fent) (areas-pending-clear))
           (setq name (areas-ask-name))
-          (setq res (areas-place (car b) (cadr b) nil name nil (areas-text-height)))
+          (setq res (areas-place (car b) (cadr b) fent name (if fent T nil) (areas-text-height)))
+          ;; Si el campo no ha podido crearse, el contorno no sirve de nada.
+          (if (and fent (/= (cadr res) "campo")) (entdel fent))
+          (setq *areas-pending* nil)
           (areas-record res name)
         )
       )
@@ -827,10 +943,18 @@
 
 ;; Cuartos rotulados que siguen en el dibujo, en el orden en que se
 ;; rotularon: lista de (nombre area-m2 ename). Poda de paso la lista.
-(defun areas-live-rooms ( / out r)
+(defun areas-live-rooms ( / out r f)
   (setq out '())
   (foreach r *areas-rooms*
-    (if (areas-alive-p (caddr r)) (setq out (cons r out)))
+    (if (areas-alive-p (caddr r))
+      (setq out (cons r out))
+      ;; El rotulo ya no esta (sustituido, borrado, deshecho): si el
+      ;; contorno oculto que lo alimentaba lo creo este comando, se retira.
+      (progn
+        (setq f (nth 3 r))
+        (if (and f (areas-alive-p f) (areas-contour-p f)) (entdel f))
+      )
+    )
   )
   (setq *areas-rooms* (reverse out))
   *areas-rooms*
@@ -963,37 +1087,159 @@
   T
 )
 
+;; Une cadenas con un separador.
+(defun areas-join (lst sep / out x)
+  (setq out "")
+  (foreach x lst
+    (setq out (if (= out "") x (strcat out sep x)))
+  )
+  out
+)
+
+;; Comprueba que un codigo de campo funciona de verdad: lo crea
+;; provisionalmente como MTEXT (en pt, con altura h), mira que sea un
+;; campo y que muestre "expected", y lo borra. T/nil.
+(defun areas-field-ok (code expected pt h / obj en txt ok)
+  (setq obj (vl-catch-all-apply 'areas-add-text (list pt code h 5 *areas-table-layer*)))
+  (if (vl-catch-all-error-p obj)
+    nil
+    (progn
+      (setq en (vlax-vla-object->ename obj))
+      (setq txt (areas-shown-text en))
+      (setq txt (if txt (vl-string-subst "." "," txt) ""))
+      (setq ok (and (areas-has-field en) (vl-string-search expected txt) T))
+      (entdel en)
+      ok
+    )
+  )
+)
+
+;; Datos de las filas de la tabla: lista de (zona area-m2-actual
+;; codigo-de-campo-o-nil). El area es la ACTUAL de la polilinea vinculada
+;; (no la de cuando se rotulo). Con makeFields, si el cuarto sigue
+;; vinculado a una polilinea, se prepara el campo de su area y se
+;; comprueba que funciona; si no, la fila queda como texto fijo.
+(defun areas-table-data (rooms pt h makeFields / out r fent fac live obj id code)
+  (setq out '())
+  (foreach r rooms
+    (setq fent (nth 3 r))
+    (setq fac (if (nth 4 r) (nth 4 r) 1.0))
+    (setq live (cadr r))
+    (setq code nil)
+    (if (and fent (areas-alive-p fent))
+      (progn
+        (setq obj (vlax-ename->vla-object fent))
+        (setq live (* (vla-get-Area obj) fac))
+        (if makeFields
+          (progn
+            (setq id (areas-object-id obj))
+            (if id
+              (progn
+                (setq code (areas-field-code id fac))
+                (if (not (areas-field-ok code (rtos live 2 *areas-precision*) pt h))
+                  (setq code nil)
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (setq out (cons (list (if (and (car r) (/= (car r) "")) (car r) "Sin nombre") live code) out))
+  )
+  (reverse out)
+)
+
+;; Total de la tabla: (texto-de-la-suma contenido-de-la-celda es-campo).
+;; Si algun cuarto esta vinculado, la celda es un CAMPO de suma
+;; (AcExpr) con los campos de area de las filas vinculadas y, para las
+;; filas de texto fijo, su numero; se comprueba que funciona y, si no,
+;; se deja el numero fijo.
+(defun areas-table-total (data pt h makeFields / sum terms anyField txt code r)
+  (setq sum 0.0 terms '() anyField nil)
+  (foreach r data
+    (setq sum (+ sum (cadr r)))
+    (if (caddr r)
+      (progn
+        (setq anyField T)
+        (setq terms (cons (caddr r) terms))
+      )
+      (setq terms (cons (rtos (cadr r) 2 8) terms))
+    )
+  )
+  (setq terms (reverse terms))
+  (setq txt (rtos sum 2 *areas-precision*))
+  (if (and makeFields anyField)
+    (progn
+      (setq code (strcat "%<\\AcExpr (" (areas-join terms " + ") ") \\f \"%lu2%pr"
+                         (itoa *areas-precision*) "\">%"))
+      (if (areas-field-ok code txt pt h)
+        (list txt code T)
+        (list txt txt nil)
+      )
+    )
+    (list txt txt nil)
+  )
+)
+
 ;; Crea la tabla de superficies con los cuartos rotulados que siguen en
-;; el dibujo, en el punto que se pida. Es un grupo de deshacer.
-(defun areas-make-table (doc / rooms rows sum r pt h total)
+;; el dibujo, en el punto que se pida. Por defecto es una tabla
+;; SINCRONIZADA (rejilla de lineas y textos cuyas superficies y total son
+;; campos vinculados a las polilineas de los cuartos); con la opcion
+;; Nativa es una tabla de AutoCAD con valores fijos. Es un grupo de
+;; deshacer.
+(defun areas-make-table (doc / rooms pt kind h data tot rows r nField nRows)
   (setq rooms (areas-live-rooms))
   (if (not rooms)
     (princ "\n[AREACUARTOS] No hay cuartos rotulados para la tabla.")
     (progn
-      (setq pt (getpoint "\n[AREACUARTOS] Punto de insercion de la tabla (esquina superior izquierda): "))
+      (setq kind "sync")
+      (initget "Nativa")
+      (setq pt (getpoint "\n[AREACUARTOS] Punto de insercion de la tabla, esquina superior izquierda [Nativa = tabla de AutoCAD con valores fijos]: "))
+      (if (and pt (not (listp pt)))
+        (progn
+          (setq kind "nativa")
+          (setq pt (getpoint "\n[AREACUARTOS] Punto de insercion de la tabla (esquina superior izquierda): "))
+        )
+      )
       (if (not pt)
         (princ "\n[AREACUARTOS] Tabla cancelada.")
         (progn
           (setq pt (trans pt 1 0))
           (setq h (areas-table-height rooms))
-          (setq rows '() sum 0.0)
-          (foreach r rooms
-            (setq sum (+ sum (cadr r)))
-            (setq rows (cons (list (if (and (car r) (/= (car r) "")) (car r) "Sin nombre")
-                                   (rtos (cadr r) 2 *areas-precision*))
-                             rows))
-          )
-          (setq rows (reverse rows))
-          (setq total (rtos sum 2 *areas-precision*))
           (areas-ensure-layer *areas-table-layer*)
           (vla-StartUndoMark doc)
-          (if (not (areas-table-native pt rows total h))
-            (areas-table-grid pt rows total h)
+          (setq data (areas-table-data rooms pt h (= kind "sync")))
+          (setq tot (areas-table-total data pt h (= kind "sync")))
+          ;; Filas: (zona contenido-de-la-celda-de-area), con el campo si lo hay.
+          (setq rows '() nField 0)
+          (foreach r data
+            (if (caddr r) (setq nField (1+ nField)))
+            (setq rows (cons (list (car r) (if (caddr r) (caddr r) (rtos (cadr r) 2 *areas-precision*))) rows))
+          )
+          (setq rows (reverse rows))
+          (setq nRows (length rows))
+          (if (= kind "nativa")
+            (if (not (areas-table-native pt rows (car tot) h))
+              (areas-table-grid pt rows (car tot) h)
+            )
+            (areas-table-grid pt rows (cadr tot) h)
           )
           (vla-EndUndoMark doc)
           (setq *areas-table-done* T)
-          (princ (strcat "\n[AREACUARTOS] Tabla creada: " (itoa (length rows)) " zona(s), total "
-                         total " m2."))
+          (princ (strcat "\n[AREACUARTOS] Tabla creada: " (itoa nRows) " zona(s), total " (car tot) " m2"
+                         (if (= kind "nativa")
+                           " (tabla de AutoCAD, valores fijos)."
+                           (strcat " (" (itoa nField) " superficie(s) sincronizada(s) con campo; total "
+                                   (if (caddr tot) "sincronizado" "fijo") ").")
+                         )))
+          (if (and (= kind "sync") (> nField 0))
+            (princ "\n[AREACUARTOS] Si cambias un cuarto, la tabla y los rotulos se actualizan con REGEN o ACTUALIZARCAMPO (UPDATEFIELD).")
+          )
+          (if (and (= kind "sync") (< nField nRows))
+            (princ (strcat "\n[AREACUARTOS] Aviso: " (itoa (- nRows nField)) " zona(s) son texto fijo (no estan vinculadas a una"
+                           " polilinea): activa Vincular al pulsar dentro, o usa Polilineas con Campo, y vuelve a crear la tabla."))
+          )
         )
       )
     )
@@ -1009,6 +1255,7 @@
   (defun *error* (msg)
     (vl-catch-all-apply 'vla-EndUndoMark (list doc))
     (areas-preview-clear)
+    (areas-pending-clear)
     (areas-restore-vars)
     (redraw)
     (if (and msg (not (wcmatch (strcase msg) "*CANCEL*,*QUIT*,*EXIT*")))
@@ -1022,8 +1269,8 @@
 
   (setq done nil)
   (while (not done)
-    (initget "Polilineas Esquinas Tabla Confirmar Altura Unidades")
-    (setq p (getpoint "\n[AREACUARTOS] Pulsa DENTRO de un cuarto [Polilineas/Esquinas/Tabla/Confirmar/Altura/Unidades] <terminar>: "))
+    (initget "Polilineas Esquinas Tabla Confirmar Vincular Altura Unidades")
+    (setq p (getpoint "\n[AREACUARTOS] Pulsa DENTRO de un cuarto [Polilineas/Esquinas/Tabla/Confirmar/Vincular/Altura/Unidades] <terminar>: "))
     ;; getpoint devuelve un punto (lista), una palabra clave (cadena) o
     ;; nil con Intro; se distingue por tipo antes de comparar palabras.
     (cond
@@ -1036,6 +1283,12 @@
         (vla-EndUndoMark doc)
       )
       ((= p "Tabla") (areas-make-table doc))
+      ((= p "Vincular")
+        (setq *areas-link* (not *areas-link*))
+        (princ (if *areas-link*
+                 "\n[AREACUARTOS] Vincular: ACTIVADO (al pulsar dentro se conserva el contorno, oculto, y el rotulo es un CAMPO que se actualiza solo)."
+                 "\n[AREACUARTOS] Vincular: desactivado (al pulsar dentro no se deja ninguna polilinea y el rotulo es texto fijo)."))
+      )
       ((= p "Confirmar")
         (setq *areas-confirm* (not *areas-confirm*))
         (princ (if *areas-confirm*
