@@ -24,6 +24,17 @@
 ;;       Las esquinas tambien se pueden pedir directamente con la
 ;;       opcion Esquinas.
 ;;     - El rotulo es texto fijo (no hay polilinea a la que vincularlo).
+;;     - Para saber QUE zona esta cogiendo: antes de rotular dice el
+;;       tamano del contorno y su area ("Contorno detectado: 4.00 x
+;;       3.19 m, area = 12.76 m2"), lo DIBUJA EN ROJO sobre el plano y
+;;       pregunta Rotular este contorno? [Si/No/Esquinas]: Si (Intro)
+;;       lo acepta; No lo descarta; Esquinas permite pulsar el contorno
+;;       a mano. Si el contorno es otro (p.ej. se ha pulsado dentro de
+;;       un plato de ducha y se queria el cuarto), basta con No o
+;;       Esquinas. Se avisa si ignora islas interiores o si el area es
+;;       rara para un cuarto. La opcion Confirmar activa o desactiva la
+;;       vista previa y la pregunta (el contorno y el area se indican
+;;       siempre). El contorno rojo es provisional: se borra al contestar.
 ;;
 ;;   Polilineas: para cuartos que YA son polilineas cerradas. Se
 ;;     seleccionan con ventana (todas de golpe) y se puede elegir:
@@ -74,6 +85,7 @@
 (setq *areas-arc-steps* 16)     ; puntos con que se muestrea cada tramo curvo
 (setq *areas-unit-forced* nil)  ; unidades elegidas a mano (opcion Unidades); nil = detectar solas
 (setq *areas-height-user* nil)  ; altura de texto elegida a mano (unidades del dibujo); nil = automatica
+(setq *areas-confirm* T)        ; ensenar y confirmar el contorno detectado antes de rotular
 
 ;; Estado de UNA ejecucion del comando (se reinicia al empezar).
 (setq *areas-unit* nil)         ; unidades detectadas/fijadas: "m", "cm" o "mm"
@@ -82,6 +94,7 @@
 (setq *areas-odd* 0)            ; cuartos con una superficie sospechosa
 (setq *areas-saved* nil)        ; variables de sistema a restaurar (ver areas-restore-vars)
 (setq *areas-table-done* nil)   ; ya se ha creado la tabla en esta ejecucion
+(setq *areas-preview* nil)      ; contorno provisional dibujado en rojo (ename)
 
 ;; Cuartos rotulados, para la tabla: lista de (nombre area-m2 ename-del-rotulo-de-area).
 ;; Se conserva entre ejecuciones; solo cuentan los que siguen en el dibujo.
@@ -552,11 +565,11 @@
 
 ;; Detecta el contorno del cuarto que rodea al punto "pt" (en UCS) con
 ;; -BOUNDARY, lee el resultado y BORRA lo que el comando haya creado.
-;; Devuelve (puntos area-en-unidades-de-dibujo^2), o nil si no ha
-;; podido. Si hay islas (columnas, mobiliario cerrado...) se queda con
-;; el contorno exterior, que es el de mayor area. OSMODE se apaga
+;; Devuelve (puntos area-en-unidades-de-dibujo^2 islas-ignoradas), o nil
+;; si no ha podido. Si hay islas (columnas, mobiliario cerrado...) se
+;; queda con el contorno exterior, que es el de mayor area. OSMODE se apaga
 ;; mientras tanto para que el punto no salte a un snap.
-(defun areas-boundary-at (pt / hb last0 e news best bestA a pts res)
+(defun areas-boundary-at (pt / hb last0 e news best bestA nPoly a pts res)
   ;; HPBOUND decide si BOUNDARY crea polilineas (1) o regiones (0); se
   ;; fuerza a polilinea mientras dura (si esta version no la tiene, se ignora).
   (setq hb (vl-catch-all-apply 'getvar (list "HPBOUND")))
@@ -578,11 +591,12 @@
     (setq news (cons e news))
     (setq e (entnext e))
   )
-  (setq best nil bestA 0.0)
+  (setq best nil bestA 0.0 nPoly 0)
   (foreach e news
     (if (and (= (cdr (assoc 0 (entget e))) "LWPOLYLINE")
              (= 1 (logand 1 (cdr (assoc 70 (entget e))))))
       (progn
+        (setq nPoly (1+ nPoly))
         (setq a (vla-get-Area (vlax-ename->vla-object e)))
         (if (> a bestA) (setq best e bestA a))
       )
@@ -590,7 +604,38 @@
   )
   (setq pts (if best (areas-room-points best) nil))
   (foreach e news (entdel e))
-  (if (and pts (>= (length pts) 3)) (list pts bestA) nil)
+  (if (and pts (>= (length pts) 3)) (list pts bestA (1- nPoly)) nil)
+)
+
+;; --- Vista previa del contorno detectado ---
+
+;; Borra el contorno provisional (si sigue ahi). Tambien lo llama *error*.
+(defun areas-preview-clear ()
+  (if (and *areas-preview* (areas-alive-p *areas-preview*))
+    (entdel *areas-preview*)
+  )
+  (setq *areas-preview* nil)
+)
+
+;; Dibuja el contorno detectado como una polilinea ROJA y gruesa, para
+;; ver sobre el plano exactamente que zona esta cogiendo. Es provisional:
+;; se borra en cuanto se contesta.
+(defun areas-preview-show (pts width / data p)
+  (areas-preview-clear)
+  (setq data (list '(0 . "LWPOLYLINE") '(100 . "AcDbEntity") (cons 8 *areas-layer*) '(62 . 1)
+                   '(100 . "AcDbPolyline") (cons 90 (length pts)) '(70 . 1) (cons 43 width)))
+  (foreach p pts
+    (setq data (append data (list (cons 10 (list (car p) (cadr p))))))
+  )
+  (setq *areas-preview* (entmakex data))
+)
+
+;; Tamano del rectangulo que envuelve al contorno, en metros: "4.00 x 3.19 m".
+(defun areas-bbox-text (pts / k xs ys)
+  (setq k (areas-scale))
+  (setq xs (mapcar 'car pts) ys (mapcar 'cadr pts))
+  (strcat (rtos (/ (- (apply 'max xs) (apply 'min xs)) k) 2 2) " x "
+          (rtos (/ (- (apply 'max ys) (apply 'min ys)) k) 2 2) " m")
 )
 
 ;; --- Contorno pulsando las esquinas ---
@@ -650,6 +695,8 @@
         (princ "\n[AREACUARTOS] Las esquinas no forman una superficie. Cancelado.")
         (progn
           (areas-ensure-unit a)
+          (princ (strcat "\n[AREACUARTOS] Area de las esquinas pulsadas: " (areas-bbox-text pts) ", area = "
+                         (rtos (* a (areas-m2-factor)) 2 *areas-precision*) " m2."))
           (setq name (areas-ask-name))
           (setq res (areas-place pts a nil name nil (areas-text-height)))
           (areas-record res name)
@@ -661,15 +708,42 @@
 
 ;; Rotula el cuarto en el que se ha pulsado: detecta su contorno y, si
 ;; no puede, pide las esquinas. Cada cuarto es un grupo de deshacer.
-(defun areas-do-click (pt doc / b name res)
+(defun areas-do-click (pt doc / b areaM2 nIsl ans name res)
   (vla-StartUndoMark doc)
   (setq b (areas-boundary-at pt))
   (if b
     (progn
       (areas-ensure-unit (cadr b))
-      (setq name (areas-ask-name))
-      (setq res (areas-place (car b) (cadr b) nil name nil (areas-text-height)))
-      (areas-record res name)
+      (setq areaM2 (* (cadr b) (areas-m2-factor)))
+      (setq nIsl (caddr b))
+      ;; Se dice QUE contorno ha cogido y cuanto mide...
+      (princ (strcat "\n[AREACUARTOS] Contorno detectado: " (areas-bbox-text (car b)) ", area = "
+                     (rtos areaM2 2 *areas-precision*) " m2"
+                     (if (> nIsl 0) (strcat " (se ignoran " (itoa nIsl) " isla(s) interior(es))") "")
+                     "."))
+      (if (or (< areaM2 0.3) (> areaM2 3000.0))
+        (princ "\n[AREACUARTOS] Atencion: esa superficie es rara para un cuarto; comprueba que es el contorno que querias.")
+      )
+      ;; ...y se ENSENA sobre el plano (en rojo) para confirmarlo antes de rotular.
+      (setq ans nil)
+      (if *areas-confirm*
+        (progn
+          (areas-preview-show (car b) (* 0.25 (areas-text-height)))
+          (princ "\n[AREACUARTOS] El contorno detectado se muestra en ROJO sobre el plano.")
+          (initget "Si No Esquinas")
+          (setq ans (getkword "\n[AREACUARTOS] Rotular este contorno? [Si/No/Esquinas] <Si>: "))
+          (areas-preview-clear)
+        )
+      )
+      (cond
+        ((= ans "No") (princ "\n[AREACUARTOS] Descartado: no se ha rotulado nada."))
+        ((= ans "Esquinas") (areas-do-corners))
+        (T
+          (setq name (areas-ask-name))
+          (setq res (areas-place (car b) (cadr b) nil name nil (areas-text-height)))
+          (areas-record res name)
+        )
+      )
     )
     (progn
       (princ "\n[AREACUARTOS] No se ha podido detectar el contorno de ese cuarto (hueco de puerta sin cerrar, o no se ve entero en pantalla).")
@@ -934,6 +1008,7 @@
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (defun *error* (msg)
     (vl-catch-all-apply 'vla-EndUndoMark (list doc))
+    (areas-preview-clear)
     (areas-restore-vars)
     (redraw)
     (if (and msg (not (wcmatch (strcase msg) "*CANCEL*,*QUIT*,*EXIT*")))
@@ -947,8 +1022,8 @@
 
   (setq done nil)
   (while (not done)
-    (initget "Polilineas Esquinas Tabla Altura Unidades")
-    (setq p (getpoint "\n[AREACUARTOS] Pulsa DENTRO de un cuarto [Polilineas/Esquinas/Tabla/Altura/Unidades] <terminar>: "))
+    (initget "Polilineas Esquinas Tabla Confirmar Altura Unidades")
+    (setq p (getpoint "\n[AREACUARTOS] Pulsa DENTRO de un cuarto [Polilineas/Esquinas/Tabla/Confirmar/Altura/Unidades] <terminar>: "))
     ;; getpoint devuelve un punto (lista), una palabra clave (cadena) o
     ;; nil con Intro; se distingue por tipo antes de comparar palabras.
     (cond
@@ -961,6 +1036,12 @@
         (vla-EndUndoMark doc)
       )
       ((= p "Tabla") (areas-make-table doc))
+      ((= p "Confirmar")
+        (setq *areas-confirm* (not *areas-confirm*))
+        (princ (if *areas-confirm*
+                 "\n[AREACUARTOS] Confirmacion del contorno: ACTIVADA (se ensena en rojo y se pregunta antes de rotular)."
+                 "\n[AREACUARTOS] Confirmacion del contorno: desactivada (se rotula directamente; el contorno y su area se siguen indicando)."))
+      )
       ((= p "Altura") (areas-ask-height))
       ((= p "Unidades") (areas-ask-units))
     )
