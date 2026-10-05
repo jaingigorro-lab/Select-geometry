@@ -37,6 +37,18 @@
 ;;       Texto - texto fijo, sin vinculo con la polilinea.
 ;;     Opcionalmente pide el nombre de cada cuarto (resaltandolo).
 ;;
+;;   Tabla: la opcion Tabla (o la pregunta final al terminar con Intro)
+;;     crea una TABLA de AutoCAD con una fila por cuarto (ZONA y
+;;     SUPERFICIE en m2) y una fila final TOTAL con la suma. Se pide el
+;;     punto de insercion (esquina superior izquierda). Recoge los
+;;     cuartos rotulados que SIGUEN en el dibujo, aunque se hayan
+;;     rotulado en ejecuciones distintas: si se repite un cuarto, o se
+;;     borra su rotulo, esa fila desaparece sola. La tabla es una
+;;     instantanea: si despues cambia un cuarto, se vuelve a crear. Va
+;;     en la capa AREAS_TABLA, con el tamano de texto de los rotulos.
+;;     Si AutoCAD no admitiera crear la tabla, se dibuja una equivalente
+;;     con lineas y textos.
+;;
 ;;   Unidades: el area siempre se rotula en m2, y se convierte desde las
 ;;   unidades del dibujo (m, cm o mm). NO hay que configurarlas: se
 ;;   detectan solas por el tamano del primer cuarto (y se dice cuales
@@ -69,6 +81,13 @@
 (setq *areas-count* 0)          ; cuartos rotulados
 (setq *areas-odd* 0)            ; cuartos con una superficie sospechosa
 (setq *areas-saved* nil)        ; variables de sistema a restaurar (ver areas-restore-vars)
+(setq *areas-table-done* nil)   ; ya se ha creado la tabla en esta ejecucion
+
+;; Cuartos rotulados, para la tabla: lista de (nombre area-m2 ename-del-rotulo-de-area).
+;; Se conserva entre ejecuciones; solo cuentan los que siguen en el dibujo.
+(setq *areas-rooms* nil)
+(setq *areas-table-layer* "AREAS_TABLA")
+(setq *areas-tbl* nil)          ; tabla a medio crear (para limpiarla si algo falla)
 
 ;; --- Utilidades ---
 
@@ -373,16 +392,23 @@
   (strcat (rtos areaM2 2 *areas-precision*) " m\\U+00B2")
 )
 
-;; Crea un MTEXT centrado en pt, en la capa de rotulos, con "str" como
-;; contenido (que puede llevar codigos de campo). Devuelve el objeto.
-(defun areas-add-mtext (pt str height / ms obj)
+;; Crea un MTEXT en pt, en la capa dada, con "str" como contenido (que
+;; puede llevar codigos de campo). "attach" es el punto de justificacion
+;; (4 = medio-izquierda, 5 = centro-medio, 6 = medio-derecha). Devuelve
+;; el objeto.
+(defun areas-add-text (pt str height attach layer / ms obj)
   (setq ms (vla-get-ModelSpace (vla-get-ActiveDocument (vlax-get-acad-object))))
   (setq obj (vla-AddMText ms (vlax-3d-point (list (car pt) (cadr pt) 0.0)) 0.0 str))
   (vla-put-Height obj height)
-  (vla-put-AttachmentPoint obj 5)                      ; centro-medio
+  (vla-put-AttachmentPoint obj attach)
   (vla-put-InsertionPoint obj (vlax-3d-point (list (car pt) (cadr pt) 0.0)))
-  (vla-put-Layer obj *areas-layer*)
+  (vla-put-Layer obj layer)
   obj
+)
+
+;; Rotulo de cuarto: MTEXT centrado, en la capa de rotulos.
+(defun areas-add-mtext (pt str height)
+  (areas-add-text pt str height 5 *areas-layer*)
 )
 
 ;; True si el MTEXT "ent" lleva un campo (diccionario ACAD_FIELD).
@@ -423,7 +449,8 @@
 ;; o nil = sin nombre) y "useField" si se quiere campo en vez de texto
 ;; fijo. Con nombre: el nombre va arriba y el area debajo, centrados
 ;; respecto al punto del cuarto; sin nombre, el area sola en el punto.
-;; Devuelve (area-m2 tipo-de-rotulo punto), con tipo "campo" o "texto".
+;; Devuelve (area-m2 tipo-de-rotulo punto ename-del-rotulo-de-area), con
+;; tipo "campo" o "texto".
 (defun areas-place (pts areaD fent name useField height
                     / fac areaM2 pt apt off id vlaObj obj en kind txt)
   (setq fac (areas-m2-factor))
@@ -469,9 +496,9 @@
     )
   )
   (if (/= kind "campo")
-    (areas-add-mtext apt (areas-static-string areaM2) height)
+    (setq en (vlax-vla-object->ename (areas-add-mtext apt (areas-static-string areaM2) height)))
   )
-  (list areaM2 kind pt)
+  (list areaM2 kind pt en)
 )
 
 ;; Rotula una polilinea cerrada ya existente. nil si no tiene area.
@@ -490,6 +517,7 @@
 (defun areas-record (res name)
   (setq *areas-total* (+ *areas-total* (car res)))
   (setq *areas-count* (1+ *areas-count*))
+  (setq *areas-rooms* (append *areas-rooms* (list (list name (car res) (nth 3 res)))))
   (if (or (< (car res) 0.3) (> (car res) 3000.0))
     (setq *areas-odd* (1+ *areas-odd*))
   )
@@ -708,10 +736,200 @@
   )
 )
 
+;; --- Tabla de superficies ---
+
+;; True si el objeto de ename "en" sigue en el dibujo (no se ha borrado,
+;; sustituido por otro rotulo, ni deshecho con U).
+(defun areas-alive-p (en / o er)
+  (setq o (vl-catch-all-apply 'vlax-ename->vla-object (list en)))
+  (if (vl-catch-all-error-p o)
+    nil
+    (progn
+      (setq er (vl-catch-all-apply 'vlax-erased-p (list o)))
+      (and (not (vl-catch-all-error-p er)) (not er))
+    )
+  )
+)
+
+;; Cuartos rotulados que siguen en el dibujo, en el orden en que se
+;; rotularon: lista de (nombre area-m2 ename). Poda de paso la lista.
+(defun areas-live-rooms ( / out r)
+  (setq out '())
+  (foreach r *areas-rooms*
+    (if (areas-alive-p (caddr r)) (setq out (cons r out)))
+  )
+  (setq *areas-rooms* (reverse out))
+  *areas-rooms*
+)
+
+;; Altura de texto de la tabla: la de los propios rotulos (asi encaja
+;; con la escala del dibujo sin depender de las unidades).
+(defun areas-table-height (rooms / h)
+  (setq h (vl-catch-all-apply 'vla-get-Height (list (vlax-ename->vla-object (caddr (car rooms))))))
+  (if (or (vl-catch-all-error-p h) (not h) (<= h 0.0))
+    (areas-text-height)
+    h
+  )
+)
+
+;; Medidas de la tabla en funcion de la altura de texto h: (alto-de-fila
+;; ancho-columna-zona ancho-columna-area margen). La columna de zonas se
+;; ajusta al nombre mas largo.
+(defun areas-table-dims (rows h / maxLen r cw)
+  (setq maxLen 10)
+  (foreach r rows
+    (if (> (strlen (car r)) maxLen) (setq maxLen (strlen (car r))))
+  )
+  (setq cw (* 0.8 h))
+  (list (* 1.8 h) (* cw (+ maxLen 3)) (* cw 17.0) (* 0.35 h))
+)
+
+;; Una LINEA en la capa de la tabla.
+(defun areas-line (p1 p2)
+  (entmake (list '(0 . "LINE") (cons 8 *areas-table-layer*)
+                 (cons 10 (list (car p1) (cadr p1) 0.0))
+                 (cons 11 (list (car p2) (cadr p2) 0.0))))
+)
+
+;; Pasos de la tabla NATIVA de AutoCAD (puede fallar: se llama dentro de
+;; un vl-catch-all-apply). "rows" = lista de (zona area-texto); "total" =
+;; texto de la suma. Todo se mide en unidades del dibujo a partir de h
+;; (el estilo de tabla por defecto esta pensado para milimetros y, sin
+;; esto, saldria enorme en un dibujo en metros).
+(defun areas-table-native-steps (pt rows total h / ms dims rowH zoneW areaW mg nR tbl i r)
+  (setq dims (areas-table-dims rows h))
+  (setq rowH (nth 0 dims) zoneW (nth 1 dims) areaW (nth 2 dims) mg (nth 3 dims))
+  (setq nR (+ 3 (length rows)))
+  (setq ms (vla-get-ModelSpace (vla-get-ActiveDocument (vlax-get-acad-object))))
+  (setq tbl (vla-AddTable ms (vlax-3d-point (list (car pt) (cadr pt) 0.0)) nR 2 rowH zoneW))
+  (setq *areas-tbl* tbl)
+  (vla-put-TitleSuppressed tbl :vlax-false)
+  (vla-put-HeaderSuppressed tbl :vlax-false)
+  (vla-put-HorzCellMargin tbl mg)
+  (vla-put-VertCellMargin tbl mg)
+  (vla-SetTextHeight tbl 1 h)                            ; filas de datos
+  (vla-SetTextHeight tbl 2 h)                            ; titulo
+  (vla-SetTextHeight tbl 4 h)                            ; cabecera
+  (vla-SetColumnWidth tbl 0 zoneW)
+  (vla-SetColumnWidth tbl 1 areaW)
+  (setq i 0)
+  (while (< i nR)
+    (vla-SetRowHeight tbl i rowH)
+    (setq i (1+ i))
+  )
+  (vla-SetText tbl 0 0 "SUPERFICIES")
+  (vla-SetText tbl 1 0 "ZONA")
+  (vla-SetText tbl 1 1 "SUPERFICIE (m\\U+00B2)")
+  (setq r 2)
+  (foreach row rows
+    (vla-SetText tbl r 0 (car row))
+    (vla-SetText tbl r 1 (cadr row))
+    (setq r (1+ r))
+  )
+  (vla-SetText tbl r 0 "TOTAL")
+  (vla-SetText tbl r 1 total)
+  ;; Zonas a la izquierda, superficies a la derecha (datos y total).
+  (setq i 2)
+  (while (< i nR)
+    (vla-SetCellAlignment tbl i 0 4)
+    (vla-SetCellAlignment tbl i 1 6)
+    (setq i (1+ i))
+  )
+  (vla-put-Layer tbl *areas-table-layer*)
+  tbl
+)
+
+;; Crea la tabla nativa. T si ha ido bien; si algo falla, borra lo que
+;; hubiera a medias y devuelve nil.
+(defun areas-table-native (pt rows total h / res)
+  (setq *areas-tbl* nil)
+  (setq res (vl-catch-all-apply 'areas-table-native-steps (list pt rows total h)))
+  (if (vl-catch-all-error-p res)
+    (progn
+      (if *areas-tbl* (vl-catch-all-apply 'vla-Delete (list *areas-tbl*)))
+      (setq *areas-tbl* nil)
+      (princ (strcat "\n[AREACUARTOS] Aviso: no se ha podido crear la tabla de AutoCAD ("
+                     (vl-catch-all-error-message res) "); se dibuja una equivalente con lineas y textos."))
+      nil
+    )
+    T
+  )
+)
+
+;; Tabla equivalente hecha con lineas y textos (respaldo).
+(defun areas-table-grid (pt rows total h
+                         / dims rowH zoneW areaW mg w nR x0 y0 r yc row)
+  (setq dims (areas-table-dims rows h))
+  (setq rowH (nth 0 dims) zoneW (nth 1 dims) areaW (nth 2 dims) mg (nth 3 dims))
+  (setq w (+ zoneW areaW))
+  (setq nR (+ 3 (length rows)))
+  (setq x0 (car pt) y0 (cadr pt))
+  ;; Rejilla: lineas horizontales, bordes izquierdo y derecho, y el
+  ;; divisor de columnas (que no atraviesa la fila del titulo).
+  (setq r 0)
+  (while (<= r nR)
+    (areas-line (list x0 (- y0 (* r rowH))) (list (+ x0 w) (- y0 (* r rowH))))
+    (setq r (1+ r))
+  )
+  (areas-line (list x0 y0) (list x0 (- y0 (* nR rowH))))
+  (areas-line (list (+ x0 w) y0) (list (+ x0 w) (- y0 (* nR rowH))))
+  (areas-line (list (+ x0 zoneW) (- y0 rowH)) (list (+ x0 zoneW) (- y0 (* nR rowH))))
+  ;; Titulo y cabecera.
+  (areas-add-text (list (+ x0 (/ w 2.0)) (- y0 (* 0.5 rowH))) "SUPERFICIES" h 5 *areas-table-layer*)
+  (areas-add-text (list (+ x0 (/ zoneW 2.0)) (- y0 (* 1.5 rowH))) "ZONA" h 5 *areas-table-layer*)
+  (areas-add-text (list (+ x0 zoneW (/ areaW 2.0)) (- y0 (* 1.5 rowH))) "SUPERFICIE (m\\U+00B2)" h 5 *areas-table-layer*)
+  ;; Filas de datos y total.
+  (setq r 2)
+  (foreach row (append rows (list (list "TOTAL" total)))
+    (setq yc (- y0 (* (+ r 0.5) rowH)))
+    (areas-add-text (list (+ x0 mg) yc) (car row) h 4 *areas-table-layer*)
+    (areas-add-text (list (- (+ x0 w) mg) yc) (cadr row) h 6 *areas-table-layer*)
+    (setq r (1+ r))
+  )
+  T
+)
+
+;; Crea la tabla de superficies con los cuartos rotulados que siguen en
+;; el dibujo, en el punto que se pida. Es un grupo de deshacer.
+(defun areas-make-table (doc / rooms rows sum r pt h total)
+  (setq rooms (areas-live-rooms))
+  (if (not rooms)
+    (princ "\n[AREACUARTOS] No hay cuartos rotulados para la tabla.")
+    (progn
+      (setq pt (getpoint "\n[AREACUARTOS] Punto de insercion de la tabla (esquina superior izquierda): "))
+      (if (not pt)
+        (princ "\n[AREACUARTOS] Tabla cancelada.")
+        (progn
+          (setq pt (trans pt 1 0))
+          (setq h (areas-table-height rooms))
+          (setq rows '() sum 0.0)
+          (foreach r rooms
+            (setq sum (+ sum (cadr r)))
+            (setq rows (cons (list (if (and (car r) (/= (car r) "")) (car r) "Sin nombre")
+                                   (rtos (cadr r) 2 *areas-precision*))
+                             rows))
+          )
+          (setq rows (reverse rows))
+          (setq total (rtos sum 2 *areas-precision*))
+          (areas-ensure-layer *areas-table-layer*)
+          (vla-StartUndoMark doc)
+          (if (not (areas-table-native pt rows total h))
+            (areas-table-grid pt rows total h)
+          )
+          (vla-EndUndoMark doc)
+          (setq *areas-table-done* T)
+          (princ (strcat "\n[AREACUARTOS] Tabla creada: " (itoa (length rows)) " zona(s), total "
+                         total " m2."))
+        )
+      )
+    )
+  )
+)
+
 ;; --- Comando ---
 
 (defun c:AREACUARTOS
-  ( / *error* doc p done)
+  ( / *error* doc p done kw)
 
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (defun *error* (msg)
@@ -724,13 +942,13 @@
     (princ)
   )
 
-  (setq *areas-unit* nil *areas-total* 0.0 *areas-count* 0 *areas-odd* 0)
+  (setq *areas-unit* nil *areas-total* 0.0 *areas-count* 0 *areas-odd* 0 *areas-table-done* nil)
   (areas-ensure-layer *areas-layer*)
 
   (setq done nil)
   (while (not done)
-    (initget "Polilineas Esquinas Altura Unidades")
-    (setq p (getpoint "\n[AREACUARTOS] Pulsa DENTRO de un cuarto [Polilineas/Esquinas/Altura/Unidades] <terminar>: "))
+    (initget "Polilineas Esquinas Tabla Altura Unidades")
+    (setq p (getpoint "\n[AREACUARTOS] Pulsa DENTRO de un cuarto [Polilineas/Esquinas/Tabla/Altura/Unidades] <terminar>: "))
     ;; getpoint devuelve un punto (lista), una palabra clave (cadena) o
     ;; nil con Intro; se distingue por tipo antes de comparar palabras.
     (cond
@@ -742,6 +960,7 @@
         (areas-do-corners)
         (vla-EndUndoMark doc)
       )
+      ((= p "Tabla") (areas-make-table doc))
       ((= p "Altura") (areas-ask-height))
       ((= p "Unidades") (areas-ask-units))
     )
@@ -755,6 +974,14 @@
         (princ (strcat "\n[AREACUARTOS] Aviso: " (itoa *areas-odd*) " cuarto(s) con una superficie fuera de lo normal"
                        " (menos de 0.3 o mas de 3000 m2). Si las areas no cuadran, usa la opcion Unidades"
                        " para indicar si el dibujo esta en m, cm o mm."))
+      )
+      ;; Al terminar, se ofrece la tabla (si no se ha hecho ya).
+      (if (not *areas-table-done*)
+        (progn
+          (initget "Si No")
+          (setq kw (getkword "\n[AREACUARTOS] Crear una tabla con las zonas y la superficie total? [Si/No] <Si>: "))
+          (if (/= kw "No") (areas-make-table doc))
+        )
       )
     )
     (princ "\n[AREACUARTOS] No se ha rotulado ningun cuarto.")
