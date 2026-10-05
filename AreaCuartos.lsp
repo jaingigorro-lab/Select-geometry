@@ -19,9 +19,11 @@
 ;;     Texto - texto fijo, sin vinculo con la polilinea.
 ;;
 ;;   Unidades: el area siempre se rotula en m2, y se convierte desde las
-;;   unidades del dibujo (m, cm o mm; se pregunta la primera vez, y se
-;;   puede cambiar con la opcion Unidades). Con el dibujo en metros no
-;;   hace falta ninguna conversion.
+;;   unidades del dibujo (m, cm o mm). NO hay que configurarlas: se
+;;   detectan solas por el tamano de los cuartos seleccionados (y se
+;;   dice cuales ha detectado). Si alguna vez se equivoca, la opcion
+;;   Unidades permite fijarlas escribiendo m, cm o mm (o Auto para
+;;   volver a detectarlas). Con el dibujo en metros no hay conversion.
 ;;
 ;;   Vuelve a ejecutarlo cuando quieras: los rotulos que ya hubiera
 ;;   dentro de cada cuarto (en la capa AREAS) se sustituyen por el
@@ -34,8 +36,9 @@
 ;;
 ;;   Uso:
 ;;     1. Ejecutar AREACUARTOS.
-;;     2. Elegir Campo / Texto (Intro = Campo), y la altura del texto.
+;;     2. Elegir Campo / Texto (Intro = Campo).
 ;;     3. Seleccionar con ventana las polilineas de los cuartos.
+;;     4. Intro para aceptar la altura de texto por defecto (0.20 m).
 ;; ==========================================================
 
 ;; --- Parametros ---
@@ -44,7 +47,8 @@
 (setq *areas-precision* 2)      ; decimales del area
 (setq *areas-layer* "AREAS")    ; capa de los rotulos
 (setq *areas-arc-steps* 16)     ; puntos con que se muestrea cada tramo curvo
-(setq *areas-unit* nil)         ; "m", "cm" o "mm"; se pregunta la primera vez
+(setq *areas-unit* "m")         ; unidades con las que se esta trabajando: "m", "cm" o "mm"
+(setq *areas-unit-forced* nil)  ; unidades elegidas a mano (opcion Unidades); nil = detectar solas
 
 ;; --- Utilidades ---
 
@@ -66,22 +70,70 @@
   )
 )
 
-;; Pregunta las unidades del dibujo. Se pregunta -en vez de fiarse de
-;; INSUNITS- porque las plantillas suelen dejarlo en milimetros aunque
-;; se dibuje en metros; INSUNITS solo se usa para sugerir el valor.
-(defun areas-ask-units ( / u def kw)
-  (setq u (getvar "INSUNITS"))
-  (setq def
-    (cond
-      (*areas-unit* *areas-unit*)
-      ((= u 4) "mm")
-      ((= u 5) "cm")
-      (T "m")
+;; Interpreta lo que el usuario escribe como unidades: devuelve "m",
+;; "cm", "mm" o "auto", o nil si no lo entiende. Se lee como TEXTO
+;; libre (no con palabras clave de initget) porque "m", "cm" y "mm"
+;; empiezan igual y AutoCAD puede darlas por ambiguas.
+(defun areas-parse-unit (s / v)
+  (setq v (strcase (vl-string-trim " " s) T))
+  (cond
+    ((or (= v "m") (= v "metro") (= v "metros") (= v "1")) "m")
+    ((or (= v "cm") (= v "centimetro") (= v "centimetros") (= v "2")) "cm")
+    ((or (= v "mm") (= v "milimetro") (= v "milimetros") (= v "3")) "mm")
+    ((or (= v "") (= v "a") (= v "auto") (= v "automatico") (= v "automaticas") (= v "4")) "auto")
+    (T nil)
+  )
+)
+
+;; Pregunta las unidades del dibujo (opcion Unidades). "Auto" (o Intro
+;; sobre un valor ya automatico) deja que se detecten solas por el
+;; tamano de los cuartos, que es lo normal: no se fia de INSUNITS
+;; porque las plantillas lo dejan en milimetros aunque se dibuje en
+;; metros.
+(defun areas-ask-units ( / s u)
+  (setq u nil)
+  (while (not u)
+    (setq s (getstring (strcat "\n[AREACUARTOS] Unidades del dibujo: m, cm, mm o Auto <"
+                               (if *areas-unit-forced* *areas-unit-forced* "Auto") ">: ")))
+    (setq u (if (= s "")
+              (if *areas-unit-forced* *areas-unit-forced* "auto")
+              (areas-parse-unit s)))
+    (if (not u)
+      (princ "\n[AREACUARTOS] No entiendo esa respuesta: escribe m, cm, mm o Auto.")
     )
   )
-  (initget "m cm mm")
-  (setq kw (getkword (strcat "\n[AREACUARTOS] Unidades del dibujo [m/cm/mm] <" def ">: ")))
-  (setq *areas-unit* (if kw (strcase kw T) def))
+  (setq *areas-unit-forced* (if (= u "auto") nil u))
+)
+
+;; Detecta las unidades del dibujo por la superficie MEDIANA de las
+;; polilineas cerradas seleccionadas (area en unidades del dibujo al
+;; cuadrado): un cuarto real mide entre ~1 y ~3000 m2, que en metros
+;; son 1..3000, en cm2 son >= 10000 y en mm2 son >= 1000000.
+(defun areas-detect-unit (ss / i en areas a n med)
+  (setq areas '() i 0)
+  (while (< i (sslength ss))
+    (setq en (ssname ss i))
+    (if (= 1 (logand 1 (cdr (assoc 70 (entget en)))))
+      (progn
+        (setq a (vla-get-Area (vlax-ename->vla-object en)))
+        (if (> a 1e-9) (setq areas (cons a areas)))
+      )
+    )
+    (setq i (1+ i))
+  )
+  (if areas
+    (progn
+      (setq areas (vl-sort areas '<))
+      (setq n (length areas))
+      (setq med (nth (/ n 2) areas))
+      (cond
+        ((< med 3000.0) "m")
+        ((< med 1000000.0) "cm")
+        (T "mm")
+      )
+    )
+    "m"
+  )
 )
 
 ;; Crea la capa "name" si no existe.
@@ -274,8 +326,8 @@
   n
 )
 
-;; Rotula un cuarto. Devuelve (area-m2 tipo-de-rotulo-creado), con tipo
-;; "campo" o "texto", o nil si no se ha podido (area nula).
+;; Rotula un cuarto. Devuelve (area-m2 tipo-de-rotulo-creado punto), con
+;; tipo "campo" o "texto", o nil si no se ha podido (area nula).
 (defun areas-label-room (ent useField height / vlaObj areaM2 pts pt id fac obj en kind txt)
   (setq vlaObj (vlax-ename->vla-object ent))
   (setq fac (areas-m2-factor))
@@ -318,7 +370,7 @@
       (if (/= kind "campo")
         (areas-add-mtext pt (areas-static-string areaM2) height)
       )
-      (list areaM2 kind)
+      (list areaM2 kind pt)
     )
   )
 )
@@ -326,7 +378,7 @@
 ;; --- Comando ---
 
 (defun c:AREACUARTOS
-  ( / *error* doc k kw done useField h ss i en ed res total nField nText nSkip nBad)
+  ( / *error* doc k kw done useField h ss i en ed res total nField nText nSkip nBad nOdd nShown)
 
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (defun *error* (msg)
@@ -337,9 +389,7 @@
     (princ)
   )
 
-  (if (not *areas-unit*) (areas-ask-units))
-
-  ;; Tipo de rotulo (y opcion de volver a elegir unidades).
+  ;; Tipo de rotulo (y opcion de fijar las unidades a mano).
   (setq done nil)
   (while (not done)
     (initget "Campo Texto Unidades")
@@ -351,21 +401,29 @@
     )
   )
 
-  ;; Altura del texto (la ultima usada pasa a ser la siguiente por defecto).
-  (setq k (areas-scale))
-  (initget 6)
-  (setq h (getdist (strcat "\n[AREACUARTOS] Altura del texto <" (rtos (* *areas-text-m* k) 2 3) ">: ")))
-  (if (not h) (setq h (* *areas-text-m* k)))
-  (setq *areas-text-m* (/ h k))
-
   (princ "\n[AREACUARTOS] Selecciona las polilineas cerradas de los cuartos: ")
   (setq ss (ssget '((0 . "LWPOLYLINE"))))
   (if (not ss)
     (princ "\n[AREACUARTOS] No se ha seleccionado ninguna polilinea.")
     (progn
+      ;; Unidades: las elegidas a mano o, si no, las detectadas por el
+      ;; tamano de los cuartos. Se dice cuales son para que se vea.
+      (setq *areas-unit* (if *areas-unit-forced* *areas-unit-forced* (areas-detect-unit ss)))
+      (princ (strcat "\n[AREACUARTOS] Unidades del dibujo: " *areas-unit*
+                     (if *areas-unit-forced*
+                       " (elegidas con la opcion Unidades)."
+                       " (detectadas por el tamano de los cuartos; si no son estas, usa la opcion Unidades).")))
+
+      ;; Altura del texto (la ultima usada pasa a ser la siguiente por defecto).
+      (setq k (areas-scale))
+      (initget 6)
+      (setq h (getdist (strcat "\n[AREACUARTOS] Altura del texto <" (rtos (* *areas-text-m* k) 2 3) ">: ")))
+      (if (not h) (setq h (* *areas-text-m* k)))
+      (setq *areas-text-m* (/ h k))
+
       (areas-ensure-layer *areas-layer*)
       (vla-StartUndoMark doc)
-      (setq total 0.0 nField 0 nText 0 nSkip 0 nBad 0 i 0)
+      (setq total 0.0 nField 0 nText 0 nSkip 0 nBad 0 nOdd 0 nShown 0 i 0)
       (while (< i (sslength ss))
         (setq en (ssname ss i))
         (setq ed (entget en))
@@ -377,6 +435,15 @@
               (T
                 (setq total (+ total (car res)))
                 (if (= (cadr res) "campo") (setq nField (1+ nField)) (setq nText (1+ nText)))
+                (if (or (< (car res) 0.3) (> (car res) 3000.0)) (setq nOdd (1+ nOdd)))
+                ;; Una linea por cuarto (los 10 primeros) para ver donde y que se ha puesto.
+                (if (< nShown 10)
+                  (progn
+                    (setq nShown (1+ nShown))
+                    (princ (strcat "\n  - " (rtos (car res) 2 *areas-precision*) " m2 (" (cadr res)
+                                   ") en (" (rtos (car (caddr res)) 2 2) ", " (rtos (cadr (caddr res)) 2 2) ")"))
+                  )
+                )
               )
             )
           )
@@ -397,6 +464,11 @@
       )
       (if (> nBad 0)
         (princ (strcat "\n[AREACUARTOS] " (itoa nBad) " polilinea(s) sin area omitida(s)."))
+      )
+      (if (> nOdd 0)
+        (princ (strcat "\n[AREACUARTOS] Aviso: " (itoa nOdd) " cuarto(s) con una superficie fuera de lo normal"
+                       " (menos de 0.3 o mas de 3000 m2). Si las areas no cuadran, usa la opcion Unidades"
+                       " para indicar si el dibujo esta en m, cm o mm."))
       )
     )
   )

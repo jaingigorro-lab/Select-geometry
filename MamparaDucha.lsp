@@ -74,23 +74,36 @@
   )
 )
 
-;; Pregunta las unidades en las que esta dibujado el plano, ofreciendo
-;; como valor por defecto lo que diga INSUNITS (o la ultima respuesta).
-;; Se pregunta -en vez de fiarse solo de INSUNITS- porque las plantillas
-;; suelen dejar INSUNITS en milimetros aunque se dibuje en metros.
-(defun mampara-ask-units ( / u def kw)
-  (setq u (getvar "INSUNITS"))
-  (setq def
-    (cond
-      (*mampara-unit* *mampara-unit*)
-      ((= u 4) "mm")
-      ((= u 5) "cm")
-      (T "m")
+;; Interpreta lo que el usuario escribe como unidades: "m", "cm" o
+;; "mm", o nil si no lo entiende. Se lee como TEXTO libre (no con
+;; palabras clave de initget) porque "m", "cm" y "mm" empiezan igual y
+;; AutoCAD puede darlas por ambiguas, con lo que "m" no se aceptaba.
+(defun mampara-parse-unit (s / v)
+  (setq v (strcase (vl-string-trim " " s) T))
+  (cond
+    ((or (= v "m") (= v "metro") (= v "metros") (= v "1")) "m")
+    ((or (= v "cm") (= v "centimetro") (= v "centimetros") (= v "2")) "cm")
+    ((or (= v "mm") (= v "milimetro") (= v "milimetros") (= v "3")) "mm")
+    (T nil)
+  )
+)
+
+;; Pregunta las unidades en las que esta dibujado el plano (Intro = la
+;; ultima respuesta, o metros la primera vez). No se usa INSUNITS como
+;; sugerencia: las plantillas lo dejan en milimetros aunque se dibuje
+;; en metros, y con la unidad equivocada la mampara saldria 1000 veces
+;; mas grande o mas pequena.
+(defun mampara-ask-units ( / def s u)
+  (setq def (if *mampara-unit* *mampara-unit* "m"))
+  (setq u nil)
+  (while (not u)
+    (setq s (getstring (strcat "\n[MAMPARA] Unidades del dibujo (m, cm o mm) <" def ">: ")))
+    (setq u (if (= s "") def (mampara-parse-unit s)))
+    (if (not u)
+      (princ "\n[MAMPARA] No entiendo esa respuesta: escribe m, cm o mm.")
     )
   )
-  (initget "m cm mm")
-  (setq kw (getkword (strcat "\n[MAMPARA] Unidades del dibujo [m/cm/mm] <" def ">: ")))
-  (setq *mampara-unit* (if kw (strcase kw T) def))
+  (setq *mampara-unit* u)
   (mampara-scale)
 )
 
