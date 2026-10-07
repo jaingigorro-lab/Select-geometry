@@ -730,7 +730,16 @@ class MplCanvas(Canvas):
                      rotation_mode="anchor", color=col, zorder=900, family=FONT_FAMILY)
 
 
-FONT_FAMILY = ["Liberation Sans", "Arial", "DejaVu Sans"]
+def _pick_font():
+    from matplotlib import font_manager as fm
+    have = {f.name for f in fm.fontManager.ttflist}
+    for cand in ("Liberation Sans", "Arial", "Helvetica", "Nimbus Sans", "DejaVu Sans"):
+        if cand in have:
+            return [cand]
+    return ["sans-serif"]
+
+
+FONT_FAMILY = _pick_font()
 
 
 # ======================================================================================
@@ -983,15 +992,17 @@ def draw_elev(c, G, g):
     dim(c, V2(u1, zt), V2(u1 + mf, zt), V2(u1, yd), V2(u1 + mf, yd), fmt(mf), h, out="a", tk=0.2 * h, tag="MF")
     # rótulos con guía
     yl = zt + 3.7 * h
-    xm = u1 + 0.30 * G.OW
+    xm = u1 + 0.46 * G.OW
     c.text("Marco 20\u00d740", V2(xm, yl), h, "bc", 0, tag="l_marco")
     leader(c, V2(xm, yl - 0.25 * h), V2(xm, zt - mf / 2))
-    xv = u1 + 0.72 * G.OW
+    xv = u1 + 0.76 * G.OW
     c.text("Vidrio 10", V2(xv, yl + 2.0 * h), h, "bc", 0, tag="l_vidrio")
     leader(c, V2(xv, yl + 1.75 * h), V2(xv, zt - mf - 0.2 * gh))
-    c.text("Junta de sombra", V2(L / 2, OZ - 2.2 * h), h, "bc", 0, tag="l_junta1")
-    c.text("Z\u00f3calo 60, retr. 25", V2(L / 2, OZ - 3.6 * h), h, "bc", 0, tag="l_junta2")
-    leader(c, V2(L / 2, OZ - 3.8 * h), V2(L / 2, ZH * 0.5))
+    j1, j2 = "Junta de sombra", "Z\u00f3calo 60, retr. 25"
+    hj = min(h, 0.86 * G.OW / tw(j2, 1.0))
+    c.text(j1, V2(L / 2, OZ - 2.2 * hj), hj, "bc", 0, tag="l_junta1")
+    c.text(j2, V2(L / 2, OZ - 3.6 * hj), hj, "bc", 0, tag="l_junta2")
+    leader(c, V2(L / 2, OZ - 3.8 * hj), V2(L / 2, ZH * 0.5))
 
 
 def draw_sect(c, G, g, detail=True):
@@ -1365,3 +1376,350 @@ def build_3d(meshes, path):
             md.faces = m.tris()
     ezzoom.extents(msp, factor=1.1)
     doc.saveas(path)
+
+
+def set_extents(doc):
+    """Rellena $EXTMIN/$EXTMAX con la caja real del modelspace."""
+    ext = ezbbox.extents(doc.modelspace())
+    doc.header["$EXTMIN"] = tuple(ext.extmin)
+    doc.header["$EXTMAX"] = tuple(ext.extmax)
+    return ext
+
+
+# ======================================================================================
+# 10. LÁMINA DE PRESENTACIÓN (PNG + PDF)
+# ======================================================================================
+SHEET_W, SHEET_H = 17.0, 11.6          # pulgadas
+SHEET_DPI = 200
+PT_TARGET = 9.4                         # tamaño de cotas en la lámina (pt)
+LIGHT = np.array([0.55, -0.35, 0.75])
+LIGHT = LIGHT / np.linalg.norm(LIGHT)
+MAT = {                                 # colores de material (RGB 0-255)
+    "cuerpo": (232, 228, 219),
+    "zocalo": (58, 58, 62),
+    "marco": (30, 30, 33),
+    "hogar": (66, 66, 70),
+    "vidrio": (150, 205, 228),
+    "muro": (196, 196, 196),
+    "suelo": (226, 224, 220),
+}
+
+
+def _subdiv(tri, lim):
+    out, stack = [], [tri]
+    while stack:
+        t = stack.pop()
+        e = [float(np.linalg.norm(t[i] - t[(i + 1) % 3])) for i in range(3)]
+        if max(e) <= lim:
+            out.append(t)
+            continue
+        i = int(np.argmax(e))
+        a, b, c = t[i], t[(i + 1) % 3], t[(i + 2) % 3]
+        m = (a + b) / 2
+        stack.append(np.array([a, m, c]))
+        stack.append(np.array([m, b, c]))
+    return out
+
+
+def mesh_to_tris(m, lim):
+    """Triángulos (con su normal exterior y etiqueta) de una malla; los grandes se subdividen para ordenar bien."""
+    V = np.asarray(m.verts, float)
+    out = []
+    for f, tag in zip(m.faces, m.tags + [""] * (len(m.faces) - len(m.tags))):
+        pts = V[f]
+        nrm = _newell(pts)
+        nrm = nrm / np.linalg.norm(nrm)
+        for a, b, c in (_ear_clip(pts, _newell(pts)) if len(f) > 3 else [(0, 1, 2)]) if len(f) != 4 else [(0, 1, 2), (0, 2, 3)]:
+            for t in _subdiv(np.array([pts[a], pts[b], pts[c]]), lim):
+                out.append((t, nrm, tag))
+    return out
+
+
+def box_mesh(x0, x1, y0, y1, z0, z1, name="BOX"):
+    m = Mesh(name)
+    m.prism([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], z0, z1)
+    return m
+
+
+def shade(rgb, nrm, amb=0.42):
+    f = amb + (1 - amb) * max(0.0, float(np.dot(nrm, LIGHT)))
+    return tuple(min(1.0, v / 255.0 * f) for v in rgb)
+
+
+def render_iso(ax, G, meshes, elev=22, azim=-47, zoom=1.0):
+    """Perspectiva isométrica (proyección ortogonal) con sombreado por orientación de cara."""
+    ax.set_proj_type("ortho")
+    ax.computed_zorder = False
+    ax.set_axis_off()
+    ext = (-220, 1580, -1580, 220, -50, 2720)
+    ctx = [box_mesh(-220, 1580, -1580, 220, -50, 0, "suelo"),
+           box_mesh(-220, 1580, 0, 220, 0, 2700, "muro_fondo"),
+           box_mesh(-220, 0, -1580, 0, 0, 2700, "muro_izq")]
+    ctx_cols = ["suelo", "muro", "muro"]
+    polys, cols = [], []
+    for m, cn in zip(ctx, ctx_cols):
+        for t, nrm, _ in mesh_to_tris(m, 400.0):
+            polys.append(t)
+            cols.append(shade(MAT[cn], nrm, 0.55) + (1.0,))
+    pc = Poly3DCollection(polys, facecolors=cols, edgecolors=cols, linewidths=0.6)
+    pc.set_zorder(1)
+    ax.add_collection3d(pc)
+
+    def add(m, base, zo, lim, tagcol=None, alpha=1.0, edge="same", lw=0.6, amb=0.5):
+        P, C = [], []
+        for t, nrm, tag in mesh_to_tris(m, lim):
+            rgb = MAT[tagcol[tag]] if (tagcol and tag in tagcol) else MAT[base]
+            P.append(t)
+            C.append(shade(rgb, nrm, amb) + (alpha,))
+        ec = C if edge == "same" else edge
+        coll = Poly3DCollection(P, facecolors=C, edgecolors=ec, linewidths=lw)
+        coll.set_zorder(zo)
+        ax.add_collection3d(coll)
+
+    add(meshes["zocalo"], "zocalo", 2, 400.0, amb=0.8)
+    add(meshes["cuerpo"], "cuerpo", 3, 300.0, tagcol={"hogar": "hogar"})
+    add(meshes["marco"], "marco", 4, 400.0, edge=(0.5, 0.5, 0.55, 1.0), lw=0.35, amb=0.8)
+    add(meshes["vidrio"], "vidrio", 5, 5000.0, alpha=0.36, edge=(0.45, 0.72, 0.85, 0.55), lw=0.5)
+    ax.set_xlim(ext[0], ext[1])
+    ax.set_ylim(ext[2], ext[3])
+    ax.set_zlim(ext[4], ext[5])
+    ax.set_box_aspect((ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4]), zoom=zoom)
+    ax.view_init(elev=elev, azim=azim)
+
+
+def _wrap(s, n):
+    words, lines, cur = s.split(), [], ""
+    for w in words:
+        if len(cur) + len(w) + 1 > n and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+PARAM_ROWS = [
+    ("Ancho_Muro_Fondo (W)", "1380", "Largo sobre el muro de fondo"),
+    ("Fondo_Muro_Izq (D)", "1420", "Largo sobre el muro izquierdo"),
+    ("Chaflan_X (CX)", "720", "Cateto horizontal del chaflán"),
+    ("Chaflan_Y (CY)", "920", "Cateto vertical (en planta)"),
+    ("Solape_Muros (S)", "100", "Anclaje oculto en los muros"),
+    ("Zocalo_Alto (ZH)", "60", "Altura de la junta de sombra"),
+    ("Zocalo_Retranqueo (ZR)", "25", "Retranqueo del zócalo"),
+    ("Hogar_Ancho (OW)", "850", "Ancho del hueco, sobre el chaflán"),
+    ("Hogar_Alto (OH)", "600", "Alto del hueco"),
+    ("Hogar_Cota (OZ)", "400", "Cota inferior del hueco"),
+    ("Hogar_Fondo (OD)", "450", "Profundidad, perpendicular a la cara"),
+    ("Marco_Ancho (MF)", "20", "Ancho visto del marco"),
+    ("Marco_Prof (MD)", "40", "Profundidad del marco"),
+    ("Vidrio_Esp (VG)", "10", "Espesor, centrado en el marco"),
+    ("Altura (H) · instancia", "2600", "Altura total"),
+    ("Long_Chaflan · calculado", "1168,25", "√(CX² + CY²)"),
+    ("Margen_Hogar · calculado", "159,12", "(Long_Chaflan − OW) / 2"),
+]
+
+COMO_SE_CONSTRUYE = [
+    ("Plantilla", "Modelo genérico métrico (.rft), categoría Equipamiento especializado: planos de referencia en el origen "
+                  "(esquina interior) y los 14 parámetros de tipo de la tabla."),
+    ("Volumen", "Extrusión del pentágono de 5 lados de ZH a H, vaciado del hogar sobre la cara del chaflán (OW × OH × OD), "
+                "zócalo retranqueado ZR y anclaje oculto S dentro de los muros."),
+    ("Acabado", "Marco de acero negro de 20 × 40 y vidrio de 10 centrado; un parámetro de material por pieza. "
+                "En proyecto: origen en la esquina interior, alinear con candado a ambos muros."),
+]
+
+
+def _fit_g(fn, G, cw, ch, pt, **kw):
+    lo, hi = 0.5, 8.0
+    for _ in range(40):
+        g = (lo + hi) / 2
+        m = MeasureCanvas()
+        fn(m, G, g, **kw)
+        ex, ey = m.bb.x1 - m.bb.x0, m.bb.y1 - m.bb.y0
+        sc = min(cw / ex, ch / ey)
+        if 40.0 * g * EMF * sc * 72.0 > pt:
+            hi = g
+        else:
+            lo = g
+    return (lo + hi) / 2
+
+
+def build_lamina(G, meshes, png, pdf):
+    plt.rcParams["font.family"] = FONT_FAMILY
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["hatch.linewidth"] = 0.45
+    fig = plt.figure(figsize=(SHEET_W, SHEET_H), dpi=SHEET_DPI, facecolor="white")
+    info = dict(overlaps=[], g=[])
+
+    def fx(x):
+        return x / SHEET_W
+
+    def fy(y):
+        return y / SHEET_H
+
+    # ---- cabecera ----
+    fig.text(fx(0.4), fy(SHEET_H - 0.55), "Chimenea de esquina minimalista", fontsize=25, fontweight="bold",
+             color="#141414", va="center")
+    fig.text(fx(0.4), fy(SHEET_H - 0.98), "Dise\u00f1o de referencia para la familia de Revit \u00b7 cotas en mm \u00b7 "
+             "origen en la esquina interior \u00b7 planta, alzado de la cara diagonal, secci\u00f3n y perspectiva",
+             fontsize=11.5, color="#444444", va="center")
+    fig.add_artist(plt.Line2D([fx(0.4), fx(SHEET_W - 0.4)], [fy(SHEET_H - 1.22)] * 2, color="#bbbbbb", lw=0.8))
+
+    # ---- vistas 2D: ancho de celda = el que resulta de la altura disponible ----
+    y_top = SHEET_H - 1.38
+    row_h = 4.60
+    y_row = y_top - row_h
+    specs = [("PLANTA", "corte a 1200 mm; el hogar queda bajo el corte", draw_plan, {}),
+             ("ALZADO DE LA CARA DIAGONAL", "visto de frente, perpendicular al chafl\u00e1n", draw_elev, {}),
+             ("SECCI\u00d3N A\u2013A", "por el eje del hogar, perpendicular a la cara", draw_sect, {"detail": False})]
+    avail = 10.75
+    gap = 0.22
+    ch = row_h - 0.80
+    for _ in range(4):
+        sizes = []
+        for ttl, sub, fn, kw in specs:
+            g = _fit_g(fn, G, 9.0, ch, PT_TARGET, **kw)
+            m = MeasureCanvas()
+            fn(m, G, g, **kw)
+            ex, ey = m.bb.x1 - m.bb.x0, m.bb.y1 - m.bb.y0
+            sc = min(9.0 / ex, ch / ey)
+            sizes.append((g, m.bb, sc, ex * sc, ey * sc))
+        tot = sum(z[3] for z in sizes) + gap * (len(sizes) - 1)
+        if tot <= avail + 1e-6:
+            break
+        ch *= avail / tot * 0.995
+    xcur = 0.40 + (avail - tot) / 2 if tot < avail else 0.40
+    for (ttl, sub, fn, kw), (g, bb, sc, w_in, h_in) in zip(specs, sizes):
+        ax = fig.add_axes([fx(xcur), fy(y_row + (ch - h_in) / 2), fx(w_in), fy(h_in)])
+        ax.set_xlim(bb.x0, bb.x1)
+        ax.set_ylim(bb.y0, bb.y1)
+        ax.set_aspect("equal", adjustable="box")
+        ax.axis("off")
+        c = MplCanvas(ax, sc * 72.0)
+        fn(c, G, g, **kw)
+        info["overlaps"] += [(ttl,) + p for p in text_overlaps(c)]
+        info["g"].append((ttl, round(g, 2), round(40 * g * EMF * sc * 72, 1), round(w_in, 2), round(h_in, 2)))
+        fig.text(fx(xcur), fy(y_top - 0.12), ttl, fontsize=11.5, fontweight="bold", color="#141414", va="center")
+        fig.text(fx(xcur), fy(y_top - 0.36), sub, fontsize=9.2, color="#555555", va="center")
+        xcur += w_in + gap
+
+    # ---- perspectiva 3D con rótulos en columna ----
+    y3_0, y3_1 = 0.35, y_row - 0.18
+    fig.text(fx(0.4), fy(y3_1 - 0.12), "PERSPECTIVA", fontsize=11.5, fontweight="bold", color="#141414", va="center")
+    fig.text(fx(0.4), fy(y3_1 - 0.36), "vista desde la sala", fontsize=9.2, color="#555555", va="center")
+    ax3_x0, ax3_w = 0.30, 4.45
+    ax3_y0, ax3_h = y3_0, y3_1 - 0.45 - y3_0
+    ax3 = fig.add_axes([fx(ax3_x0), fy(ax3_y0), fx(ax3_w), fy(ax3_h)], projection="3d")
+    render_iso(ax3, G, meshes, zoom=1.12)
+    fig.canvas.draw()
+    from mpl_toolkits.mplot3d import proj3d
+
+    def to_in(p):
+        x2, y2, _ = proj3d.proj_transform(p[0], p[1], p[2], ax3.get_proj())
+        xd, yd = ax3.transData.transform((x2, y2))
+        return xd / SHEET_DPI, yd / SHEET_DPI
+
+    anchors = [
+        (G.p3(G.L * 0.34, 0, 1900), "Cuerpo liso monol\u00edtico:\nmicrocemento blanco roto"),
+        (G.p3((G.u1 + G.u2) / 2 + 150, 0, G.OZ + G.OH - 10), "Marco de acero negro\n20 \u00d7 40"),
+        (G.p3(G.u2 - 90, 0, G.OZ + G.OH * 0.45), "Vidrio de 10"),
+        (G.p3(G.u1 + 40, 0, G.OZ + 40), "Hueco del hogar\n850 \u00d7 600, cota 400"),
+        (G.p3(G.L * 0.78, 0, G.ZH * 0.5), "Junta de sombra\n(z\u00f3calo 60, retranqueo 25)"),
+    ]
+    pts = sorted([(to_in(p)[1], to_in(p)[0], t, p) for p, t in anchors], key=lambda r: -r[0])
+    xlab = ax3_x0 + ax3_w + 0.12
+    ylab = []
+    for i, (yy, xx, t, p) in enumerate(pts):
+        y = yy if i == 0 else min(yy, ylab[-1] - 0.62)
+        ylab.append(y)
+    for (yy, xx, t, p), y in zip(pts, ylab):
+        fig.add_artist(plt.Line2D([xx / SHEET_W, (xlab - 0.06) / SHEET_W], [yy / SHEET_H, y / SHEET_H], color="#333333", lw=0.8))
+        fig.add_artist(plt.Line2D([xx / SHEET_W], [yy / SHEET_H], color="#333333", marker="o", ms=3.4, mec="white", mew=0.5))
+        fig.text(xlab / SHEET_W, y / SHEET_H, t, fontsize=9.8, color="#141414", va="center", ha="left", linespacing=1.25)
+
+    # ---- recuadro "Cómo se construye" ----
+    bx0, bx1 = 6.95, 11.0
+    by1, by0 = y3_1 + 0.05, 0.35
+    ax_b = fig.add_axes([fx(bx0), fy(by0), fx(bx1 - bx0), fy(by1 - by0)])
+    ax_b.set_xlim(0, bx1 - bx0)
+    ax_b.set_ylim(0, by1 - by0)
+    ax_b.axis("off")
+    ax_b.add_patch(plt.Rectangle((0, 0), bx1 - bx0, by1 - by0, fc="#f6f4ef", ec="#cfcabd", lw=1.0))
+    yy = by1 - by0 - 0.30
+    ax_b.text(0.2, yy, "C\u00d3MO SE CONSTRUYE", fontsize=11.5, fontweight="bold", color="#141414", va="center")
+    yy -= 0.40
+    for i, (hd, tx) in enumerate(COMO_SE_CONSTRUYE, 1):
+        ax_b.text(0.2, yy, f"{i}", fontsize=14, fontweight="bold", color="#c0392b", va="center")
+        ax_b.text(0.52, yy, hd, fontsize=10.5, fontweight="bold", color="#141414", va="center")
+        yy -= 0.27
+        for ln in _wrap(tx, 52):
+            ax_b.text(0.52, yy, ln, fontsize=9.5, color="#222222", va="center")
+            yy -= 0.215
+        yy -= 0.22
+    ax_b.add_line(plt.Line2D([0.2, bx1 - bx0 - 0.2], [0.82, 0.82], color="#cfcabd", lw=0.8))
+    ax_b.text(0.2, 0.58, "No es el .rfa ni una familia param\u00e9trica: son dibujos y modelos de referencia.",
+              fontsize=9.0, color="#8a1c1c", va="center", fontweight="bold")
+    ax_b.text(0.2, 0.30, "La familia no se ha probado en Revit.", fontsize=9.0, color="#8a1c1c", va="center")
+
+    # ---- tabla de parámetros ----
+    tx0, tx1 = 11.3, SHEET_W - 0.4
+    ty1, ty0 = SHEET_H - 1.38, 4.50
+    ax_t = fig.add_axes([fx(tx0), fy(ty0), fx(tx1 - tx0), fy(ty1 - ty0)])
+    ax_t.set_xlim(0, tx1 - tx0)
+    ax_t.set_ylim(0, ty1 - ty0)
+    ax_t.axis("off")
+    wT, hT = tx1 - tx0, ty1 - ty0
+    ax_t.text(0.0, hT - 0.12, "PAR\u00c1METROS", fontsize=11.5, fontweight="bold", color="#141414", va="center")
+    ax_t.text(wT, hT - 0.12, "valores en mm", fontsize=9.2, color="#555555", va="center", ha="right")
+    rowh = (hT - 0.40) / (len(PARAM_ROWS) + 1)
+    cx = (0.08, 2.18, 2.98)
+    y = hT - 0.30
+    ax_t.add_patch(plt.Rectangle((0, y - rowh), wT, rowh, fc="#141414", ec="none"))
+    for xx, tt in zip(cx, ("Nombre", "Valor", "Significado")):
+        ax_t.text(xx, y - rowh / 2, tt, fontsize=9.6, color="white", fontweight="bold", va="center")
+    for i, (a, b, cc) in enumerate(PARAM_ROWS):
+        y -= rowh
+        if i % 2 == 0:
+            ax_t.add_patch(plt.Rectangle((0, y - rowh), wT, rowh, fc="#f2f0eb", ec="none"))
+        calc = "calculado" in a
+        ax_t.text(cx[0], y - rowh / 2, a, fontsize=9.3, color="#141414", va="center")
+        ax_t.text(cx[1] + 0.62, y - rowh / 2, b, fontsize=9.6, color="#c0392b" if not calc else "#0b6b5d",
+                  va="center", ha="right", fontweight="bold")
+        ax_t.text(cx[2], y - rowh / 2, cc, fontsize=9.3, color="#222222", va="center")
+    ax_t.add_patch(plt.Rectangle((0, y - rowh), wT, rowh * (len(PARAM_ROWS) + 1), fc="none", ec="#bbbbbb", lw=0.8))
+
+    # ---- materiales y datos derivados ----
+    mx0, mx1 = 11.3, SHEET_W - 0.4
+    my1, my0 = ty0 - 0.2, 0.35
+    ax_m = fig.add_axes([fx(mx0), fy(my0), fx(mx1 - mx0), fy(my1 - my0)])
+    ax_m.set_xlim(0, mx1 - mx0)
+    ax_m.set_ylim(0, my1 - my0)
+    ax_m.axis("off")
+    hM = my1 - my0
+    ax_m.text(0.0, hM - 0.10, "MATERIALES", fontsize=11.5, fontweight="bold", color="#141414", va="center")
+    mats = [("Cuerpo", "microcemento blanco roto, RGB 214\u00b7210\u00b7202", (214, 210, 202)),
+            ("Marco", "acero negro, RGB 28\u00b728\u00b728", (28, 28, 28)),
+            ("Vidrio", "templado claro, transparencia \u2248 85 %", (150, 205, 228)),
+            ("Hogar", "negro mate refractario, RGB 40\u00b740\u00b740", (40, 40, 40))]
+    for i, (a, b, rgb) in enumerate(mats):
+        yy = hM - 0.46 - i * 0.30
+        ax_m.add_patch(plt.Rectangle((0.0, yy - 0.10), 0.36, 0.20, fc=tuple(v / 255 for v in rgb), ec="#888888", lw=0.7))
+        ax_m.text(0.52, yy, a, fontsize=9.6, fontweight="bold", color="#141414", va="center")
+        ax_m.text(1.40, yy, b, fontsize=9.2, color="#222222", va="center")
+    yy = hM - 0.46 - 4 * 0.30 - 0.06
+    ax_m.add_line(plt.Line2D([0, mx1 - mx0], [yy] * 2, color="#cccccc", lw=0.8))
+    ax_m.text(0.0, yy - 0.20, "DATOS DERIVADOS", fontsize=11.5, fontweight="bold", color="#141414", va="center")
+    der = [("\u00c1rea visible del cuerpo", f"{G.area / 1e6:.4f} m\u00b2".replace(".", ",")),
+           ("\u00c1ngulo del chafl\u00e1n", fmt(G.ang, 2) + "\u00b0"),
+           ("Distancia de O al chafl\u00e1n", fmt(G.dO, 2) + " mm"),
+           ("Desv\u00edo del muro izquierdo", "2,39\u00b0 (59 mm), absorbido por el solape")]
+    for i, (a, b) in enumerate(der):
+        y2 = yy - 0.52 - i * 0.28
+        ax_m.text(0.0, y2, a, fontsize=9.2, color="#222222", va="center")
+        ax_m.text(2.30, y2, b, fontsize=9.2, color="#0b6b5d", fontweight="bold", va="center")
+
+    fig.savefig(png, dpi=SHEET_DPI, facecolor="white")
+    fig.savefig(pdf, facecolor="white")
+    plt.close(fig)
+    return info
