@@ -18,6 +18,12 @@ Salida (en la carpeta del script):
     Chimenea_esquina_3D.dxf          MESH cerradas por componente (zócalo, cuerpo con hueco, marco, vidrio, anclaje)
     Chimenea_esquina_diseno.png/.pdf lámina de presentación
 Al final imprime la lista de comprobaciones (OK / FALLO).
+
+Decisiones y límites:
+  * Cuerpo ortogonal; el desvío de 2,39° del muro izquierdo (59 mm) lo absorbe el solape (anclaje S = 100).
+  * La sección A–A corta por M perpendicularmente a la cara: llega al muro izquierdo a 1295,2 mm; los 1394,9 mm
+    (distancia de O al plano del chaflán) son la profundidad máxima del cuerpo y se acotan aparte.
+  * No se ha probado en Revit ni en AutoCAD: la validación es geométrica (ezdxf: auditoría, topología y volúmenes).
 """
 from __future__ import annotations
 
@@ -498,7 +504,7 @@ LAYERS = {   # nombre: (ACI, grosor 1/100 mm, color matplotlib, grosor pt matplo
     "CHM-MURO":    (8, 35, "#555555", 1.1, None),
     "CHM-PERFIL":  (7, 70, "#141414", 2.2, None),
     "CHM-ZOCALO":  (30, 25, "#8a5a2b", 1.0, (138, 90, 43)),
-    "CHM-ANCLAJE": (9, 18, "#8c8c8c", 0.9, None),
+    "CHM-ANCLAJE": (8, 18, "#8a7a66", 0.9, (138, 122, 102)),
     "CHM-HOGAR":   (1, 35, "#c0392b", 1.2, None),
     "CHM-MARCO":   (7, 50, "#141414", 1.5, None),
     "CHM-VIDRIO":  (4, 25, "#1b94b8", 1.0, (27, 148, 184)),
@@ -746,7 +752,7 @@ FONT_FAMILY = _pick_font()
 # 5. ELEMENTOS DE DIBUJO COMUNES (cotas, zigzag, flechas)
 # ======================================================================================
 def dim(c, p0, p1, q0, q1, label, h, *, above=True, out=None, ext=(True, True), s0=None, s1=None,
-        tk=None, gap=None, over=None, layer="CHM-COTAS", tag=""):
+        tk=None, gap=None, over=None, layer="CHM-COTAS", tag="", fit=None):
     """Cota lineal con trazos oblicuos. p0,p1 = puntos medidos; q0,q1 = extremos de la línea de cota."""
     p0, p1, q0, q1 = (np.asarray(v, float) for v in (p0, p1, q0, q1))
     tk = 0.42 * h if tk is None else tk
@@ -777,7 +783,10 @@ def dim(c, p0, p1, q0, q1, label, h, *, above=True, out=None, ext=(True, True), 
         ang += 180
     th = math.radians(ang)
     up = np.array([-math.sin(th), math.cos(th)])
-    w = tw(label, h)
+    ht = h
+    if fit is not None and tw(label, h) > fit * Ld:           # reduce el texto (hasta el 72 %) para que quepa en el intervalo
+        ht = h * max(0.72, fit * Ld / tw(label, h))
+    w = tw(label, ht)
     mid = (q0 + q1) / 2
     if out is None:
         ctr = mid
@@ -787,7 +796,7 @@ def dim(c, p0, p1, q0, q1, label, h, *, above=True, out=None, ext=(True, True), 
         ctr = q1 + vh * (tk + 0.45 * h + w / 2)
     off = 0.28 * h
     pos = ctr + (up * off if above else -up * off)
-    c.text(label, pos, h, "bc" if above else "tc", ang, layer, tag=tag or ("dim " + label))
+    c.text(label, pos, ht, "bc" if above else "tc", ang, layer, tag=tag or ("dim " + label))
 
 
 def dim_h(c, x0, x1, y, yfrom0, yfrom1, label, h, **kw):
@@ -878,16 +887,18 @@ def draw_plan(c, G, g):
     gl = [G.pl(G.u1 + mf, ta), G.pl(G.u2 - mf, ta), G.pl(G.u2 - mf, tb), G.pl(G.u1 + mf, tb)]
     c.fill([gl], "CHM-VIDRIO", VIDRIO_RGB)
     c.line(gl, "CHM-VIDRIO", closed=True)
-    # eje del hogar (= traza de la sección A-A) y su rótulo
-    a_out = 400.0
+    # eje del hogar (= traza de la sección A-A) con su marca "A" en el extremo exterior
+    a_out = 250.0
     c.line([G.M - G.n * a_out, G.M + G.n * (G.OD + 0.6 * h)], "CHM-EJES", ls="CENTER")
-    lab = "Eje del hogar"
-    hl = min(h, 0.82 * (a_out - 0.9 * h) / tw(lab, 1.0))
-    ang_e = math.degrees(math.atan2(G.n[1], G.n[0])) - 180      # sentido legible (hacia la derecha-abajo)
-    c.text(lab, G.M - G.n * (a_out * 0.52) + G.d * (0.32 * hl), hl, "bc", ang_e, "CHM-TEXTO", color=RED, tag="eje")
+    pa = G.M - G.n * (a_out + 0.9 * h)
+    c.circle(pa, 0.9 * h, "CHM-EJES", color=(30, 30, 30), fillrgb=(255, 255, 255))
+    c.text("A", pa, 1.0 * h, "mc", 0, "CHM-TEXTO", tag="A")
     # etiqueta del hogar dentro del hueco, paralela a la cara
-    c.text("Hogar 850×450", G.pl((G.u1 + G.u2) / 2 - 0.2 * G.OW, G.OD * 0.5), h, "mc", G.ang, "CHM-TEXTO",
-           color=RED, tag="hogar")
+    c.text("Hogar", G.pl((G.u1 + G.u2) / 2 - 0.2 * G.OW, G.OD * 0.5), 1.05 * h, "mc", G.ang,
+           "CHM-TEXTO", color=RED, tag="hogar")
+    # profundidad del hogar 450 (lado del extremo C)
+    dd = 1.4 * h
+    dim(c, G.P2, G.P3, G.P2 + dd * G.d, G.P3 + dd * G.d, fmt(G.OD), h, ext=(False, True), s1=G.P3, tag="OD")
 
     # ---- ejes X / Y del origen (planos de referencia) ----
     xa0, xa1 = -T - 0.9 * off1, XR + 2.0 * h
@@ -920,7 +931,7 @@ def draw_plan(c, G, g):
     dim(c, V2(xz, -D), V2(xz, -D + G.ZR), V2(xz, -D), V2(xz, -D + G.ZR), fmt(G.ZR), h, ext=(False, False), out="b",
         tk=0.22 * h, tag="ZR")
     # ángulo del chaflán sobre la horizontal (en Dv)
-    ra = 420.0
+    ra = 300.0
     c.arc(Dv, ra, 0.0, G.ang, "CHM-COTAS")
     for a in (0.0, G.ang):
         v = np.array([math.cos(math.radians(a)), math.sin(math.radians(a))])
@@ -936,7 +947,7 @@ def draw_plan(c, G, g):
         s0 = G.pl(ua, G.OD) if ua > 0 else None
         s1 = G.pl(ub, G.OD) if ub < G.L else None
         dim(c, G.pl(ua, 0), G.pl(ub, 0), G.pl(ua, k1), G.pl(ub, k1), lab, h, s0=s0, s1=s1,
-            tag="chaflan " + lab)
+            tag="chaflan " + lab, fit=0.8)
     dim(c, G.Dv, G.C, G.pl(0, k2), G.pl(G.L, k2), fmt(G.L, 2), h, tag="chaflan total")
 
 
@@ -991,13 +1002,13 @@ def draw_elev(c, G, g):
     yd = zt + 2.2 * h
     dim(c, V2(u1, zt), V2(u1 + mf, zt), V2(u1, yd), V2(u1 + mf, yd), fmt(mf), h, out="a", tk=0.2 * h, tag="MF")
     # rótulos con guía
-    yl = zt + 3.7 * h
-    xm = u1 + 0.46 * G.OW
+    yl = zt + 4.6 * h
+    xm = u1 + 0.50 * G.OW
     c.text("Marco 20\u00d740", V2(xm, yl), h, "bc", 0, tag="l_marco")
     leader(c, V2(xm, yl - 0.25 * h), V2(xm, zt - mf / 2))
-    xv = u1 + 0.76 * G.OW
-    c.text("Vidrio 10", V2(xv, yl + 2.0 * h), h, "bc", 0, tag="l_vidrio")
-    leader(c, V2(xv, yl + 1.75 * h), V2(xv, zt - mf - 0.2 * gh))
+    xv = u1 + 0.80 * G.OW
+    c.text("Vidrio 10", V2(xv, yl + 2.1 * h), h, "bc", 0, tag="l_vidrio")
+    leader(c, V2(xv, yl + 1.85 * h), V2(xv, zt - mf - 0.2 * gh))
     j1, j2 = "Junta de sombra", "Z\u00f3calo 60, retr. 25"
     hj = min(h, 0.86 * G.OW / tw(j2, 1.0))
     c.text(j1, V2(L / 2, OZ - 2.2 * hj), hj, "bc", 0, tag="l_junta1")
@@ -1039,7 +1050,6 @@ def draw_sect(c, G, g, detail=True):
     c.line(body, "CHM-PERFIL", closed=True)
     c.line([V2(-3 * h, 0), V2(x_end, 0)], "CHM-PERFIL")
     # interior del hogar, marco y vidrio
-    cav = [V2(G.MD, OZ + G.MF), V2(OD, OZ), V2(OD, zt), V2(G.MD, zt - G.MF)]
     c.fill([[V2(0, OZ), V2(OD, OZ), V2(OD, zt), V2(0, zt)]], "CHM-HOGAR", HOGAR_RGB)
     c.line([V2(0, OZ), V2(OD, OZ), V2(OD, zt), V2(0, zt)], "CHM-HOGAR", closed=True)
     mf, md = G.MF, G.MD
@@ -1068,13 +1078,17 @@ def draw_sect(c, G, g, detail=True):
     dim_h(c, 0, OD, yd, zt, zt, fmt(OD), h)
     # profundidades totales
     yt1, yt2 = H + off1, H + off2
-    dim_h(c, 0, tW, yt1, H, H, fmt(tW, 1) + " (hasta el muro izq.)", h, tag="prof eje")
-    dim_h(c, 0, G.dO, yt2, H, H, fmt(G.dO, 1) + " (hasta la esquina O)", h, tag="prof O")
+    l1, l2 = fmt(tW, 1) + " (hasta el muro izq.)", fmt(G.dO, 1) + " (hasta la esquina O)"
+    if tw(l1, h) > 0.9 * tW:
+        l1 = fmt(tW, 1)
+    if tw(l2, h) > 0.9 * G.dO:
+        l2 = fmt(G.dO, 1)
+    dim_h(c, 0, tW, yt1, H, H, l1, h, tag="prof eje")
+    dim_h(c, 0, G.dO, yt2, H, H, l2, h, tag="prof O")
     # retranqueo del zócalo (25) bajo el suelo
     yb = -off1
     dim_h(c, 0, ZR, yb, ZH, 0, fmt(ZR), h, out="a", tk=0.22 * h, tag="ZR sec")
     # marca del detalle A
-    ra = 0.0
     if detail:
         cx, cz = G.MD / 2, OZ + mf / 2
         c.circle(V2(cx, cz), 0.9 * h, "CHM-COTAS", color=(11, 107, 93))
@@ -1327,7 +1341,7 @@ def build_plantilla(G, path):
     xs = xr - 3900.0
     c.line([V2(x_min, ytb - Hc), V2(xr, ytb - Hc), V2(xr, ytb), V2(x_min, ytb)], "CHM-CAJETIN", closed=True)
     c.line([V2(xs, ytb - Hc), V2(xs, ytb)], "CHM-CAJETIN")
-    ht = min(2.2 * h, 0.94 * (xs - x_min - 2 * h) / tw(TITULO, 1.0))
+    ht = min(2.2 * h, 0.80 * (xs - x_min - 2 * h) / tw(TITULO, 1.0))
     c.text(TITULO, V2(x_min + h, ytb - 3.0 * h), ht, "bl", 0, "CHM-TEXTO", tag="cajetin titulo")
     c.text("Planta, alzado de la cara diagonal y sección por el eje del hogar — familia: Equipamiento especializado"
            " (plantilla Modelo genérico métrico)", V2(x_min + h, ytb - 5.2 * h), 0.95 * h, "bl", 0, "CHM-TEXTO", tag="cajetin sub")
@@ -1337,6 +1351,8 @@ def build_plantilla(G, path):
     c.text("No se ha probado en Revit", V2(xs + h, ytb - 7.4 * h), 0.95 * h, "bl", 0, "CHM-TEXTO", tag="cajetin rev")
     info["overlaps"] += [("cajetin",) + p for p in text_overlaps(c)]
     info["bbox"] = (x_min, ytb - Hc, xr, max(v["bbox"][3] for v in info["views"]))
+    set_extents(doc)
+    ezzoom.extents(doc.modelspace(), factor=1.05)
     doc.saveas(path)
     return info
 
@@ -1374,6 +1390,7 @@ def build_3d(meshes, path):
         with e.edit_data() as md:
             md.vertices = [tuple(v) for v in m.verts]
             md.faces = m.tris()
+    set_extents(doc)
     ezzoom.extents(msp, factor=1.1)
     doc.saveas(path)
 
@@ -1479,7 +1496,20 @@ def render_iso(ax, G, meshes, elev=22, azim=-47, zoom=1.0):
     add(meshes["zocalo"], "zocalo", 2, 400.0, amb=0.8)
     add(meshes["cuerpo"], "cuerpo", 3, 300.0, tagcol={"hogar": "hogar"})
     add(meshes["marco"], "marco", 4, 400.0, edge=(0.5, 0.5, 0.55, 1.0), lw=0.35, amb=0.8)
-    add(meshes["vidrio"], "vidrio", 5, 5000.0, alpha=0.36, edge=(0.45, 0.72, 0.85, 0.55), lw=0.5)
+    add(meshes["vidrio"], "vidrio", 5, 5000.0, alpha=0.30, edge="none", lw=0.0)
+    # reflejos sobre el vidrio (dos bandas claras)
+    ta = (G.MD - G.VG) / 2 - 0.6
+    ua, ub = G.u1 + G.MF, G.u2 - G.MF
+    za, zb = G.OZ + G.MF, G.OZ + G.OH - G.MF
+    gw = ub - ua
+    bands = []
+    for x0_, wd in ((0.14, 0.07), (0.25, 0.025)):
+        xa, xb = ua + x0_ * gw, ua + (x0_ + wd) * gw
+        sh = 0.30 * (zb - za)
+        bands.append([G.p3(xa, ta, za), G.p3(xb, ta, za), G.p3(xb + sh, ta, zb), G.p3(xa + sh, ta, zb)])
+    gl = Poly3DCollection(bands, facecolors=(1, 1, 1, 0.28), edgecolors="none", linewidths=0)
+    gl.set_zorder(6)
+    ax.add_collection3d(gl)
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
     ax.set_zlim(ext[4], ext[5])
@@ -1521,12 +1551,12 @@ PARAM_ROWS = [
 ]
 
 COMO_SE_CONSTRUYE = [
-    ("Plantilla", "Modelo genérico métrico (.rft), categoría Equipamiento especializado: planos de referencia en el origen "
-                  "(esquina interior) y los 14 parámetros de tipo de la tabla."),
-    ("Volumen", "Extrusión del pentágono de 5 lados de ZH a H, vaciado del hogar sobre la cara del chaflán (OW × OH × OD), "
-                "zócalo retranqueado ZR y anclaje oculto S dentro de los muros."),
-    ("Acabado", "Marco de acero negro de 20 × 40 y vidrio de 10 centrado; un parámetro de material por pieza. "
-                "En proyecto: origen en la esquina interior, alinear con candado a ambos muros."),
+    ("Plantilla", "Modelo gen\u00e9rico m\u00e9trico (.rft), categor\u00eda Equipamiento especializado; planos de referencia en el "
+                  "origen (esquina interior) y los 14 par\u00e1metros de tipo."),
+    ("Volumen", "Extrusi\u00f3n del pent\u00e1gono de ZH a H con vaciado del hogar en el chafl\u00e1n (OW \u00d7 OH \u00d7 OD), "
+                "z\u00f3calo retranqueado ZR y anclaje oculto S dentro de los muros."),
+    ("Acabado", "Marco de acero negro 20 \u00d7 40 y vidrio de 10 centrado, con un material por pieza. En proyecto: "
+                "origen en la esquina interior y alineado con candado a ambos muros."),
 ]
 
 
@@ -1572,10 +1602,10 @@ def build_lamina(G, meshes, png, pdf):
     y_row = y_top - row_h
     specs = [("PLANTA", "corte a 1200 mm; el hogar queda bajo el corte", draw_plan, {}),
              ("ALZADO DE LA CARA DIAGONAL", "visto de frente, perpendicular al chafl\u00e1n", draw_elev, {}),
-             ("SECCI\u00d3N A\u2013A", "por el eje del hogar, perpendicular a la cara", draw_sect, {"detail": False})]
+             ("SECCI\u00d3N A\u2013A", "por el eje del hogar\n1295,2 al muro izq.; 1394,9 a la esquina O", draw_sect, {"detail": False})]
     avail = 10.75
     gap = 0.22
-    ch = row_h - 0.80
+    ch = row_h - 0.88
     for _ in range(4):
         sizes = []
         for ttl, sub, fn, kw in specs:
@@ -1589,7 +1619,8 @@ def build_lamina(G, meshes, png, pdf):
         if tot <= avail + 1e-6:
             break
         ch *= avail / tot * 0.995
-    xcur = 0.40 + (avail - tot) / 2 if tot < avail else 0.40
+    gap = max(gap, (avail - sum(z[3] for z in sizes)) / (len(sizes) - 1))
+    xcur = 0.40
     for (ttl, sub, fn, kw), (g, bb, sc, w_in, h_in) in zip(specs, sizes):
         ax = fig.add_axes([fx(xcur), fy(y_row + (ch - h_in) / 2), fx(w_in), fy(h_in)])
         ax.set_xlim(bb.x0, bb.x1)
@@ -1601,7 +1632,8 @@ def build_lamina(G, meshes, png, pdf):
         info["overlaps"] += [(ttl,) + p for p in text_overlaps(c)]
         info["g"].append((ttl, round(g, 2), round(40 * g * EMF * sc * 72, 1), round(w_in, 2), round(h_in, 2)))
         fig.text(fx(xcur), fy(y_top - 0.12), ttl, fontsize=11.5, fontweight="bold", color="#141414", va="center")
-        fig.text(fx(xcur), fy(y_top - 0.36), sub, fontsize=9.2, color="#555555", va="center")
+        for k_, ln_ in enumerate(sub.split("\n")):
+            fig.text(fx(xcur), fy(y_top - 0.36 - 0.20 * k_), ln_, fontsize=9.2, color="#555555", va="center")
         xcur += w_in + gap
 
     # ---- perspectiva 3D con rótulos en columna ----
@@ -1611,7 +1643,7 @@ def build_lamina(G, meshes, png, pdf):
     ax3_x0, ax3_w = 0.30, 4.45
     ax3_y0, ax3_h = y3_0, y3_1 - 0.45 - y3_0
     ax3 = fig.add_axes([fx(ax3_x0), fy(ax3_y0), fx(ax3_w), fy(ax3_h)], projection="3d")
-    render_iso(ax3, G, meshes, zoom=1.12)
+    render_iso(ax3, G, meshes, zoom=0.98)
     fig.canvas.draw()
     from mpl_toolkits.mplot3d import proj3d
 
@@ -1628,11 +1660,10 @@ def build_lamina(G, meshes, png, pdf):
         (G.p3(G.L * 0.78, 0, G.ZH * 0.5), "Junta de sombra\n(z\u00f3calo 60, retranqueo 25)"),
     ]
     pts = sorted([(to_in(p)[1], to_in(p)[0], t, p) for p, t in anchors], key=lambda r: -r[0])
-    xlab = ax3_x0 + ax3_w + 0.12
-    ylab = []
-    for i, (yy, xx, t, p) in enumerate(pts):
-        y = yy if i == 0 else min(yy, ylab[-1] - 0.62)
-        ylab.append(y)
+    xlab = ax3_x0 + ax3_w + 0.10
+    y_hi, y_lo = ax3_y0 + ax3_h - 0.35, ax3_y0 + 0.40
+    n_l = len(pts)
+    ylab = [y_hi - i * (y_hi - y_lo) / (n_l - 1) for i in range(n_l)]
     for (yy, xx, t, p), y in zip(pts, ylab):
         fig.add_artist(plt.Line2D([xx / SHEET_W, (xlab - 0.06) / SHEET_W], [yy / SHEET_H, y / SHEET_H], color="#333333", lw=0.8))
         fig.add_artist(plt.Line2D([xx / SHEET_W], [yy / SHEET_H], color="#333333", marker="o", ms=3.4, mec="white", mew=0.5))
@@ -1653,14 +1684,14 @@ def build_lamina(G, meshes, png, pdf):
         ax_b.text(0.2, yy, f"{i}", fontsize=14, fontweight="bold", color="#c0392b", va="center")
         ax_b.text(0.52, yy, hd, fontsize=10.5, fontweight="bold", color="#141414", va="center")
         yy -= 0.27
-        for ln in _wrap(tx, 52):
-            ax_b.text(0.52, yy, ln, fontsize=9.5, color="#222222", va="center")
-            yy -= 0.215
-        yy -= 0.22
-    ax_b.add_line(plt.Line2D([0.2, bx1 - bx0 - 0.2], [0.82, 0.82], color="#cfcabd", lw=0.8))
-    ax_b.text(0.2, 0.58, "No es el .rfa ni una familia param\u00e9trica: son dibujos y modelos de referencia.",
-              fontsize=9.0, color="#8a1c1c", va="center", fontweight="bold")
-    ax_b.text(0.2, 0.30, "La familia no se ha probado en Revit.", fontsize=9.0, color="#8a1c1c", va="center")
+        for ln in _wrap(tx, 56):
+            ax_b.text(0.52, yy, ln, fontsize=9.4, color="#222222", va="center")
+            yy -= 0.21
+        yy -= 0.30
+    ax_b.add_line(plt.Line2D([0.2, bx1 - bx0 - 0.2], [1.12, 1.12], color="#cfcabd", lw=0.8))
+    ax_b.text(0.2, 0.86, "No es el .rfa ni una familia param\u00e9trica:", fontsize=9.4, color="#8a1c1c", va="center", fontweight="bold")
+    ax_b.text(0.2, 0.60, "son dibujos y modelos de referencia verificados.", fontsize=9.4, color="#8a1c1c", va="center", fontweight="bold")
+    ax_b.text(0.2, 0.30, "La familia no se ha probado en Revit.", fontsize=9.4, color="#8a1c1c", va="center")
 
     # ---- tabla de parámetros ----
     tx0, tx1 = 11.3, SHEET_W - 0.4
@@ -1723,3 +1754,243 @@ def build_lamina(G, meshes, png, pdf):
     fig.savefig(pdf, facecolor="white")
     plt.close(fig)
     return info
+
+
+# ======================================================================================
+# 11. VERIFICACIÓN
+# ======================================================================================
+class Checks:
+    def __init__(self):
+        self.items = []
+
+    def add(self, name, ok, detail=""):
+        self.items.append((name, bool(ok), detail))
+        print(("OK    " if ok else "FALLO ") + f"{name}" + (f" — {detail}" if detail else ""))
+
+    def near(self, name, value, expected, tol, unit="", nd=4):
+        ok = abs(value - expected) <= tol
+        self.add(name, ok, f"{value:.{nd}f}{unit} (esperado {expected}{unit} ± {tol})")
+
+    def summary(self):
+        n_ok = sum(1 for _, ok, _ in self.items if ok)
+        print(f"\nRESUMEN: {n_ok} OK, {len(self.items) - n_ok} FALLO de {len(self.items)} comprobaciones")
+        return len(self.items) - n_ok
+
+
+def check_geometry(ck, G):
+    pent = [tuple(p) for p in G.pent]
+    ck.add("Perfil visible cerrado y simple (pentágono, 5 vértices, sin autointersecciones)",
+           len(pent) == 5 and polygon_is_simple(pent) and G.area > 0, f"{len(pent)} vértices")
+    ck.near("Área visible del cuerpo [m²]", G.area / 1e6, 1.6284, 0.001, " m²")
+    ck.near("Área por fórmula W·D − CX·CY/2 [m²]", (G.W * G.D - G.CX * G.CY / 2) / 1e6, G.area / 1e6, 1e-9, " m²", 6)
+    ck.add("Vértice C = (1380, −500) según la especificación", np.allclose(G.C, (1380, -500), atol=1e-9), f"C = ({G.C[0]:.3f}; {G.C[1]:.3f})")
+    ck.add("Vértice Dv = (660, −1420) según la especificación", np.allclose(G.Dv, (660, -1420), atol=1e-9), f"Dv = ({G.Dv[0]:.3f}; {G.Dv[1]:.3f})")
+    ck.near("Longitud del chaflán", G.L, 1168.25, 0.01, " mm", 3)
+    ck.near("Ángulo del chaflán sobre el eje X", G.ang, 51.95, 0.01, "°", 3)
+    ck.add("Dirección d = (0,6163; 0,7875) y normal n = (−0,7875; 0,6163)",
+           np.allclose(G.d, (0.6163, 0.7875), atol=1e-4) and np.allclose(G.n, (-0.7875, 0.6163), atol=1e-4), f"d = {np.round(G.d, 4)}, n = {np.round(G.n, 4)}")
+    ck.add("Punto medio M = (1020, −960)", np.allclose(G.M, (1020, -960), atol=1e-9), f"M = ({G.M[0]:.3f}; {G.M[1]:.3f})")
+    # distancia de O a la recta del chaflán por producto vectorial (independiente de n)
+    v = G.C - G.Dv
+    dist = abs(v[0] * (G.O[1] - G.Dv[1]) - v[1] * (G.O[0] - G.Dv[0])) / math.hypot(*v)
+    ck.near("Distancia de O al plano del chaflán", dist, 1394.91, 0.05, " mm", 3)
+    ck.near("Distancia de O (vía normal n)", G.dO, 1394.91, 0.05, " mm", 3)
+    spec = {"P1": (758.1, -1294.7), "P2": (1281.9, -625.3), "P3": (927.6, -348.0), "P4": (403.7, -1017.4)}
+    ok = all(np.allclose(getattr(G, k), v, atol=0.1) for k, v in spec.items())
+    ck.add("Coordenadas P1–P4 del hueco según la especificación (±0,1)", ok,
+           "; ".join(f"{k} = ({getattr(G, k)[0]:.1f}; {getattr(G, k)[1]:.1f})" for k in spec))
+    inside = all(point_in_polygon(getattr(G, k), pent, 1e-6) for k in ("P1", "P2", "P3", "P4"))
+    ck.add("P1–P4 dentro (o sobre el borde de) el pentágono", inside)
+    seg_c = lambda p: abs(v[0] * (p[1] - G.Dv[1]) - v[1] * (p[0] - G.Dv[0])) / math.hypot(*v)
+    ck.add("P1 y P2 sobre la cara del chaflán; P3 y P4 a OD = 450 hacia dentro",
+           seg_c(G.P1) < 1e-6 and seg_c(G.P2) < 1e-6 and abs(seg_c(G.P3) - G.OD) < 1e-6 and abs(seg_c(G.P4) - G.OD) < 1e-6)
+    m1 = float(np.hypot(*(G.P1 - G.Dv)))
+    m2 = float(np.hypot(*(G.C - G.P2)))
+    ck.near("Margen del hueco hacia Dv", m1, 159.12, 0.05, " mm", 3)
+    ck.near("Margen del hueco hacia C", m2, 159.12, 0.05, " mm", 3)
+    ck.add("Hueco en altura dentro del cuerpo (400 ≥ 60 y 1000 ≤ 2600)", G.OZ >= G.ZH and G.OZ + G.OH <= G.H)
+    ck.add("Zócalo retranqueado dentro del pentágono y a 25 de las caras vistas",
+           all(point_in_polygon(p, pent, 1e-6) for p in G.zoc) and abs(seg_c(G.Cz) - G.ZR) < 1e-6 and abs(seg_c(G.Dz) - G.ZR) < 1e-6
+           and abs(G.Cz[0] - (G.W - G.ZR)) < 1e-9 and abs(G.Dz[1] + (G.D - G.ZR)) < 1e-9)
+    ck.near("Fondo en el eje del hogar hasta el muro izquierdo (X = 0)", G.tW, 1295.23, 0.01, " mm", 3)
+
+
+def check_mesh_dxf(ck, path3d, G):
+    doc = ezdxf.readfile(path3d)
+    aud = doc.audit()
+    ck.add("DXF 3D: auditoría de ezdxf sin errores", len(aud.errors) == 0, f"{len(aud.errors)} errores, {len(aud.fixes)} correcciones")
+    msp = doc.modelspace()
+    ex = G.vol_expected()
+    found = {}
+    layers_ok = True
+    for e in msp:
+        if e.dxftype() != "MESH":
+            layers_ok = False
+            continue
+        found[e.dxf.layer] = e
+    ck.add("DXF 3D: solo entidades MESH, una por capa de componente",
+           layers_ok and sorted(found) == sorted(v[0] for v in LAYERS_3D.values()), ", ".join(sorted(found)))
+    cols = [LAYERS_3D[k][2] for k in LAYERS_3D]
+    ck.add("DXF 3D: colores de capa distintos", len(set(cols)) == len(cols) and len({doc.layers.get(v[0]).dxf.color for v in LAYERS_3D.values()}) == len(LAYERS_3D))
+    vols = {}
+    for key, (lname, _, _) in LAYERS_3D.items():
+        e = found[lname]
+        V = [tuple(v) for v in e.vertices]
+        F = [list(f) for f in e.faces]
+        st = mesh_stats(F, V)
+        vols[key] = st["volumen"]
+        ck.add(f"Malla {lname}: cerrada (cada arista en exactamente 2 caras), normales coherentes, sin caras degeneradas",
+               st["aristas_no2"] == 0 and st["dirigidas_rep"] == 0 and st["degeneradas"] == 0 and st["volumen"] > 0,
+               f"{len(V)} vértices, {len(F)} caras, {st['aristas']} aristas, volumen {st['volumen'] / 1e9:.6f} m³")
+        rel = abs(st["volumen"] - ex[key]) / ex[key]
+        ck.add(f"Volumen de {lname} = esperado (fórmula analítica)", rel < 1e-6,
+               f"{st['volumen'] / 1e9:.6f} m³ vs {ex[key] / 1e9:.6f} m³ (error relativo {rel:.1e})")
+    # cuerpo = prisma del pentágono − hueco ; total visible = cuerpo + zócalo + marco + vidrio
+    pris = G.area * (G.H - G.ZH)
+    ck.add("Cuerpo con hueco real: volumen = prisma del pentágono − OW·OH·OD (no es un cubo sin hueco)",
+           abs((pris - vols["cuerpo"]) - ex["hueco"]) < 5.0,
+           f"prisma {pris / 1e9:.6f} − cuerpo {vols['cuerpo'] / 1e9:.6f} = hueco {(pris - vols['cuerpo']) / 1e9:.6f} m³ (esperado {ex['hueco'] / 1e9:.6f})")
+    tot = vols["cuerpo"] + vols["zocalo"] + vols["marco"] + vols["vidrio"]
+    tot_exp = ex["cuerpo"] + ex["zocalo"] + ex["marco"] + ex["vidrio"]
+    ck.add("Volumen total visible (cuerpo − hueco + zócalo + marco + vidrio) coherente con el esperado",
+           abs(tot - tot_exp) / tot_exp < 1e-6, f"{tot / 1e9:.6f} m³ vs esperado {tot_exp / 1e9:.6f} m³")
+    # marco y vidrio dentro del hueco (coordenadas locales)
+    def loc(p):
+        q = np.array(p[:2]) - G.Dv
+        return float(q @ G.d), float(q @ G.n), p[2]
+    ok = True
+    for key in ("marco", "vidrio"):
+        for p in found[LAYERS_3D[key][0]].vertices:
+            u, t, z = loc(p)
+            ok &= (G.u1 - 1e-4 <= u <= G.u2 + 1e-4) and (-1e-4 <= t <= G.OD + 1e-4) and (G.OZ - 1e-4 <= z <= G.OZ + G.OH + 1e-4)
+    ck.add("Marco y vidrio contenidos en el volumen del hueco (850 × 450 × 600)", ok)
+    # cuerpo: 5 caras interiores del vaciado presentes (caras en el interior del hueco)
+    bodyV = np.array([tuple(v) for v in found["CHM3D-CUERPO"].vertices])
+    n_in = sum(1 for v in bodyV if G.u1 - 1e-4 <= loc(v)[0] <= G.u2 + 1e-4 and -1e-4 <= loc(v)[1] <= G.OD + 1e-4
+               and G.OZ - 1e-4 <= v[2] <= G.OZ + G.OH + 1e-4)
+    ck.add("Cuerpo: vértices del vaciado presentes (8 esquinas del hueco)", n_in == 8, f"{n_in} vértices sobre el contorno del hueco")
+    ext = ezbbox.extents(msp)
+    ok = (abs(ext.extmin.x + G.S) < 1e-3 and abs(ext.extmax.x - G.W) < 1e-3 and abs(ext.extmin.y + G.D) < 1e-3
+          and abs(ext.extmax.y - G.S) < 1e-3 and abs(ext.extmin.z) < 1e-6 and abs(ext.extmax.z - G.H) < 1e-6)
+    ck.add("DXF 3D: extensión razonable (X −100…1380, Y −1420…100, Z 0…2600)", ok,
+           f"X {ext.extmin.x:.0f}…{ext.extmax.x:.0f}, Y {ext.extmin.y:.0f}…{ext.extmax.y:.0f}, Z {ext.extmin.z:.0f}…{ext.extmax.z:.0f}")
+
+
+REQ_LAYERS = ["CHM-MURO", "CHM-PERFIL", "CHM-ZOCALO", "CHM-ANCLAJE", "CHM-HOGAR", "CHM-MARCO", "CHM-VIDRIO",
+              "CHM-EJES", "CHM-COTAS", "CHM-TEXTO", "CHM-RAYADOS"]
+REQ_TEXTS = ["1380", "1420", "720", "920", "500", "660", "1168,25", "850", "159", "450", "51,95°", "59 (2,39°)",
+             "2600", "1600", "600", "400", "2540", "60", "25", "20", "40", "15", "10"]
+
+
+def check_plantilla_dxf(ck, path, info, G):
+    doc = ezdxf.readfile(path)
+    aud = doc.audit()
+    ck.add("DXF 2D: auditoría de ezdxf sin errores", len(aud.errors) == 0, f"{len(aud.errors)} errores, {len(aud.fixes)} correcciones")
+    msp = doc.modelspace()
+    cnt = {}
+    for e in msp:
+        cnt[e.dxf.layer] = cnt.get(e.dxf.layer, 0) + 1
+    ck.add("DXF 2D: todas las capas requeridas con prefijo CHM- tienen entidades",
+           all(cnt.get(l, 0) > 0 for l in REQ_LAYERS) and all(l.startswith("CHM-") for l in cnt),
+           ", ".join(f"{l[4:]}={cnt.get(l, 0)}" for l in REQ_LAYERS))
+    ck.add("DXF 2D: unidades mm ($INSUNITS = 4) y versión R2013", doc.header["$INSUNITS"] == 4 and doc.dxfversion == "AC1027",
+           f"INSUNITS={doc.header['$INSUNITS']}, versión {doc.dxfversion}")
+    ext = ezbbox.extents(msp)
+    w, h = ext.extmax.x - ext.extmin.x, ext.extmax.y - ext.extmin.y
+    ck.add("DXF 2D: extensión razonable (escala real 1:1 en mm)", 5000 < w < 20000 and 3000 < h < 12000 and np.isfinite(w),
+           f"X {ext.extmin.x:.0f}…{ext.extmax.x:.0f} ({w:.0f} mm), Y {ext.extmin.y:.0f}…{ext.extmax.y:.0f} ({h:.0f} mm)")
+    # el pentágono de la planta leído del propio DXF
+    pent = None
+    for e in msp.query("LWPOLYLINE"):
+        if e.dxf.layer == "CHM-PERFIL" and e.closed and len(e) == 5:
+            pent = [tuple(p[:2]) for p in e.get_points()]
+            break
+    if pent is None:
+        ck.add("DXF 2D: perfil visible de la planta (LWPOLYLINE cerrada de 5 vértices)", False)
+    else:
+        o = np.array(pent[0])
+        rel = [tuple(np.array(p) - o) for p in pent]
+        exp = [(0, 0), (1380, 0), (1380, -500), (660, -1420), (0, -1420)]
+        ck.add("DXF 2D: perfil de la planta cerrado, simple y con vértices O, B, C, Dv, E de la especificación",
+               polygon_is_simple(pent) and all(np.allclose(a, b, atol=1e-6) for a, b in zip(rel, exp)),
+               "; ".join(f"({a:.0f}; {b:.0f})" for a, b in rel))
+        ck.near("DXF 2D: área del perfil leído del archivo [m²]", abs(shoelace(pent)) / 1e6, 1.6284, 0.001, " m²")
+    texts = {e.dxf.text for e in msp.query("TEXT")}
+    miss = [t for t in REQ_TEXTS if t not in texts]
+    ck.add("DXF 2D: cotas requeridas presentes como texto (1380, 1420, 720, 920, 500, 660, 1168,25, 850, 159, 51,95°, 59 mm...)",
+           not miss, "faltan: " + ", ".join(miss) if miss else f"{len(REQ_TEXTS)} cotas encontradas")
+    ck.add("DXF 2D: título del cajín, unidades y advertencia de familia no paramétrica",
+           TITULO in texts and AVISO in texts and any("Unidades: mm" in t for t in texts))
+    vs = info["views"]
+    gaps = []
+    for i in range(len(vs) - 1):
+        gaps.append(vs[i + 1]["bbox"][0] - vs[i]["bbox"][2])
+    ck.add("Vistas separadas ≥ 600 mm entre sí", min(gaps) >= 600.0, "separaciones: " + ", ".join(f"{g_:.0f} mm" for g_ in gaps))
+    ck.add("Sin solapes de texto/cotas en el DXF 2D (cajas de texto orientadas)", len(info["overlaps"]) == 0,
+           f"{len(info['overlaps'])} solapes" + (": " + "; ".join(str(o) for o in info["overlaps"][:5]) if info["overlaps"] else ""))
+    ck.add("Sin textos cruzados por líneas de perfil, hueco, zócalo, cotas o ejes", len(info["hits"]) == 0,
+           f"{len(info['hits'])} cruces" + (": " + "; ".join(str(o) for o in info["hits"][:5]) if info["hits"] else ""))
+
+
+def png_info(path):
+    """(ancho, alto, dpi) leyendo las cabeceras IHDR y pHYs del PNG (sin dependencias)."""
+    import struct
+    with open(path, "rb") as f:
+        data = f.read(4096)
+    w, h = struct.unpack(">II", data[16:24])
+    dpi = 0.0
+    i = data.find(b"pHYs")
+    if i > 0:
+        ppx, ppy, unit = struct.unpack(">IIB", data[i + 4:i + 13])
+        dpi = ppx * 0.0254 if unit == 1 else 0.0
+    return w, h, dpi
+
+
+def check_sheet(ck, png, pdf, info):
+    w, h, dpi = png_info(png)
+    ck.add("Lámina PNG con dpi ≥ 150", dpi >= 150 and w > 2500, f"{w}×{h} px, {dpi:.0f} dpi")
+    ck.add("Lámina PDF generada", os.path.getsize(pdf) > 10000, f"{os.path.getsize(pdf) / 1024:.0f} KB")
+    ck.add("Sin solapes de texto en las vistas de la lámina", len(info["overlaps"]) == 0,
+           f"{len(info['overlaps'])} solapes; tamaño de cotas " + ", ".join(f"{t[2]} pt" for t in info["g"]))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--tmp", default=tempfile.gettempdir(), help="carpeta para el PNG temporal de comprobación del DXF")
+    args = ap.parse_args()
+    os.makedirs(OUT_DIR, exist_ok=True)
+    p_pl = os.path.join(OUT_DIR, F_PLANTILLA)
+    p_3d = os.path.join(OUT_DIR, F_3D)
+    p_png = os.path.join(OUT_DIR, F_PNG)
+    p_pdf = os.path.join(OUT_DIR, F_PDF)
+
+    ck = Checks()
+    print("== 1. Geometría ==")
+    G = Geo()
+    check_geometry(ck, G)
+    meshes = build_meshes(G)
+
+    print("\n== 2. DXF 2D (plantilla de calco) ==")
+    info = build_plantilla(G, p_pl)
+    check_plantilla_dxf(ck, p_pl, info, G)
+    tmp_png = os.path.join(args.tmp, "chimenea_plantilla_render_temporal.png")
+    render_dxf_png(p_pl, tmp_png, width_in=20, dpi=100)
+    ck.add("Render temporal del DXF 2D con ezdxf+matplotlib", os.path.getsize(tmp_png) > 10000, tmp_png)
+
+    print("\n== 3. DXF 3D (mallas) ==")
+    build_3d(meshes, p_3d)
+    check_mesh_dxf(ck, p_3d, G)
+
+    print("\n== 4. Lámina de presentación ==")
+    linfo = build_lamina(G, meshes, p_png, p_pdf)
+    check_sheet(ck, p_png, p_pdf, linfo)
+
+    nfail = ck.summary()
+    print("\nArchivos:")
+    for p in (p_pl, p_3d, p_png, p_pdf):
+        print("  ", p, f"({os.path.getsize(p) / 1024:.0f} KB)")
+    return 1 if nfail else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
