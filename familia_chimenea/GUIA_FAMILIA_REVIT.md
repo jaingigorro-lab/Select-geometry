@@ -29,17 +29,18 @@ Convenciones: unidades en mm; el inglés entre paréntesis solo la primera vez; 
 3. Archivo → Guardar como → Familia → `Chimenea_Esquina_Minimalista.rfa`. Guarda tras cada apartado.
 4. Crear (Create) → panel Propiedades → **Categoría y parámetros de familia** (Family Category and Parameters).
 5. Categoría: **Equipamiento especializado** (Specialty Equipment).
-6. Marca **Siempre vertical** (Always vertical).
-7. Desmarca **Delimitación de habitaciones** (Room Bounding).
-8. Comprueba que «Basado en plano de trabajo» (Work plane-based) está desmarcado y pulsa Aceptar.
-9. Gestionar (Manage) → Unidades de proyecto (Project Units) → Longitud → botón de formato.
-10. Unidades: **Milímetros**.
-11. Redondeo: **2 decimales** (para ver 1168,25; luego puedes poner 0).
-12. Símbolo de unidad: ninguno. Aceptar dos veces.
-13. Navegador de proyectos (Project Browser) → Planos de planta → doble clic en **`Ref. Level`** (el nombre varía con el idioma). Todo el trabajo en planta se hace aquí.
-14. Barra de control de vista → estilo visual **Sombreado** (Shaded).
+6. Marca **Habilitar corte en vistas** (Enable Cutting in Views; el nombre en español puede variar). Existe desde Revit 2023 para esta categoría: sin ella, Equipamiento especializado **no se corta** en planta y verás la chimenea en proyección, sin el relleno de corte. En Revit 2022 o anterior la categoría no se puede cortar; si necesitas verla cortada, usa la categoría **Modelos genéricos** (Generic Models), que siempre se corta.
+7. Marca **Siempre vertical** (Always vertical).
+8. Desmarca **Delimitación de habitaciones** (Room Bounding), si aparece.
+9. Comprueba que «Basado en plano de trabajo» (Work plane-based) está desmarcado y pulsa Aceptar.
+10. Gestionar (Manage) → Unidades de proyecto (Project Units) → Longitud → botón de formato.
+11. Unidades: **Milímetros**.
+12. Redondeo: **2 decimales** (para ver 1168,25; luego puedes poner 0).
+13. Símbolo de unidad: ninguno. Aceptar dos veces.
+14. Navegador de proyectos (Project Browser) → Planos de planta → doble clic en **`Ref. Level`** (el nombre varía con el idioma). Todo el trabajo en planta se hace aquí.
+15. Barra de control de vista → estilo visual **Sombreado** (Shaded).
 
-**Comprobación:** estás en `Ref. Level`, con la categoría Equipamiento especializado y las unidades en mm con 2 decimales.
+**Comprobación:** estás en `Ref. Level`, con la categoría Equipamiento especializado, el corte en vistas activado y las unidades en mm con 2 decimales.
 
 ## 2. Parámetros y materiales
 ### 2.1 Tabla completa
@@ -536,6 +537,7 @@ Opcional; puedes hacerlo en cuanto existan los planos de origen y el cuerpo (apa
 | 19 | El DXF se ve a otra escala, queda anclado o no se puede borrar | Unidades de importación distintas de mm; el CAD importado se ancla | Reimporta con Milímetros (11, paso 5); Desanclar (Unpin) antes de borrarlo |
 | 20 | El interior del hogar pierde el pintado al cambiar parámetros | Pintar no es paramétrico y Revit regenera las caras del hueco | Repinta (6.7) y avisa de que Mat_Hogar no es paramétrico (no lo he podido comprobar) |
 | 21 | En el proyecto no veo el rectángulo discontinuo del hogar | La vista está en nivel Basto (8.3), el tipo no es el por defecto o el plano de corte no es el de 8.1 | Pasa la vista a Medio o Fino, o marca Basto en las líneas simbólicas |
+| 22 | En planta la chimenea no se ve cortada (solo líneas de proyección, sin relleno de corte) | Equipamiento especializado solo se corta con «Habilitar corte en vistas» marcado (Revit 2023 o posterior); en 2022 o anterior no se corta nunca | Crear → Categoría y parámetros de familia → marca la casilla (apartado 1, paso 6); en 2022 o anterior cambia la categoría a Modelos genéricos |
 
 **Comprobación:** tras aplicar la solución, repite el paso que falló y la línea Comprobación de su apartado.
 
