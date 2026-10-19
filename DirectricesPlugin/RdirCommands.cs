@@ -103,6 +103,52 @@ namespace DirectricesPlugin
             ed.WriteMessage($"\nRDIR: {done} directriz(es) reconstruida(s). U deshace todo el comando.");
         }
 
+        /// <summary>RDIRINFO: diagnostico. Dice que es cada objeto que tocas (por
+        /// ejemplo, cada raya de un subrayado doble: si es parte de una directriz o
+        /// una linea suelta) y, si es una directriz multiple, su estilo, enganche,
+        /// rellano, lineas y texto.</summary>
+        [CommandMethod("RDIRINFO", CommandFlags.Modal)]
+        public void RdirInfo()
+        {
+            Document doc = AcApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            Editor ed = doc.Editor;
+            while (true)
+            {
+                var peo = new PromptEntityOptions("\nRDIRINFO: toca un objeto (Intro para terminar): ") { AllowNone = true };
+                PromptEntityResult per = ed.GetEntity(peo);
+                if (per.Status != PromptStatus.OK) break;
+                using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    var ent = (Entity)tr.GetObject(per.ObjectId, OpenMode.ForRead);
+                    ed.WriteMessage($"\n  Tipo: {ent.GetType().Name}   Capa: {ent.Layer}");
+                    if (ent is MLeader ml)
+                    {
+                        string style = "?";
+                        try { style = ((MLeaderStyle)tr.GetObject(ml.MLeaderStyle, OpenMode.ForRead)).Name; }
+                        catch (System.Exception) { }
+                        ed.WriteMessage($"\n  Estilo: {style}   Escala: {ml.Scale}   Altura de texto: {ml.TextHeight}");
+                        ed.WriteMessage($"\n  Rellano: {(ml.EnableLanding ? "si" : "no")}   Quiebro: {(ml.EnableDogleg ? "si" : "no")}   Largo del quiebro: {ml.DoglegLength}   Separacion: {ml.LandingGap}");
+                        try
+                        {
+                            ed.WriteMessage($"\n  Enganche izquierda / derecha: {ml.GetTextAttachmentType(LeaderDirectionType.LeftLeader)} / {ml.GetTextAttachmentType(LeaderDirectionType.RightLeader)}");
+                        }
+                        catch (System.Exception) { }
+                        ed.WriteMessage($"\n  Lineas de directriz: {ml.LeaderLineCount}");
+                        try
+                        {
+                            using (MText m = ml.MText) ed.WriteMessage($"\n  Contenido del texto: {m.Contents}");
+                        }
+                        catch (System.Exception) { }
+                    }
+                    else if (ent is MText mt) ed.WriteMessage($"\n  Contenido: {mt.Contents}");
+                    else if (ent is DBText t) ed.WriteMessage($"\n  Texto: {t.TextString}");
+                    else ed.WriteMessage("\n  Es un objeto suelto: no forma parte de ninguna directriz.");
+                    tr.Commit();
+                }
+            }
+        }
+
         /// <summary>Rectangulo en coordenadas locales (plano XY).</summary>
         private struct Box
         {
@@ -156,11 +202,7 @@ namespace DirectricesPlugin
             string step = "leer la seleccion";
             var warnings = new List<string>();
             // Pasos no imprescindibles: si AutoCAD rechaza alguno, se avisa y se sigue
-            void Soft(string what, Action a)
-            {
-                try { a(); }
-                catch (System.Exception ex) { warnings.Add($"{what} ({ex.Message})"); }
-            }
+            void Soft(string what, Action a) => SoftTo(warnings, what, a);
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
@@ -268,16 +310,18 @@ namespace DirectricesPlugin
                     branches = branches.Select(Simplify).ToList();
 
                     // ---------- 5. Estilo, rellano y subrayado ----------
-                    step = "crear la directriz";
-                    var ml = new MLeader();
-                    ml.SetDatabaseDefaults(db);
-                    if (!db.MLeaderstyle.IsNull) Soft("aplicar el estilo de directriz actual", () => ml.MLeaderStyle = db.MLeaderstyle);
-                    Soft("dejarla no anotativa", () => ml.Annotative = AnnotativeStates.False);
-                    // Todo en unidades reales del dibujo (escala 1), para que la altura
-                    // del texto sea exactamente la del original.
-                    double styleScale = ml.Scale > 0 ? ml.Scale : 1.0;
-                    double styleArrow = ml.ArrowSize * styleScale;
-                    double gap = ml.LandingGap * styleScale;
+                    step = "leer el estilo de directriz";
+                    // Todo se hace en unidades reales del dibujo (escala 1), para que la
+                    // altura del texto sea exactamente la del original.
+                    double styleScale, styleArrow, gap;
+                    using (var probe = new MLeader())
+                    {
+                        probe.SetDatabaseDefaults(db);
+                        if (!db.MLeaderstyle.IsNull) Soft("aplicar el estilo de directriz actual", () => probe.MLeaderStyle = db.MLeaderstyle);
+                        styleScale = probe.Scale > 0 ? probe.Scale : 1.0;
+                        styleArrow = probe.ArrowSize * styleScale;
+                        gap = probe.LandingGap * styleScale;
+                    }
 
                     // core = del codo (cola de las lineas) al cruce o a la punta
                     bool dogleg = false, underline = false;
@@ -374,23 +418,7 @@ namespace DirectricesPlugin
                     // ---------- 7. Crear el MLEADER directamente en su sitio ----------
                     step = "crear la directriz";
                     var owner = (BlockTableRecord)tr.GetObject(textEnt.BlockId, OpenMode.ForWrite);
-                    // plano del MLEADER con su eje X a lo largo del texto: el rellano y
-                    // el subrayado siguen esa direccion
-                    Soft("orientar el plano de la directriz", () => ml.SetPlane(new Plane(textOrigin, xAxis, yAxis)));
-                    Soft("poner la escala general a 1", () => ml.Scale = 1.0);
-                    ml.ContentType = ContentType.MTextContent;
-                    ml.TextStyleId = styleId;
-                    ml.TextHeight = height;
-                    Soft("respetar el angulo del texto", () => ml.TextAngleType = TextAngleType.InsertAngle);
                     Arrow firstArrow = lineArrow.FirstOrDefault(a => a != null);
-                    Soft("ajustar la flecha", () =>
-                    {
-                        ml.ArrowSize = firstArrow != null ? firstArrow.Size : styleArrow;
-                        if (firstArrow != null) ml.ArrowSymbolId = firstArrow.Symbol;
-                    });
-                    Soft("ajustar la separacion del rellano", () => ml.LandingGap = gap);
-                    ml.Layer = textEnt.Layer;
-                    ml.Color = textEnt.Color;
 
                     // posicion inicial del texto, del lado del rellano (luego se ajusta)
                     double ix, iy;
@@ -409,62 +437,151 @@ namespace DirectricesPlugin
                         ix = oldBox.MinX;
                         iy = oldBox.MaxY;
                     }
-
-                    var mt = new MText();
-                    mt.SetDatabaseDefaults(db);
-                    mt.Contents = contents;
-                    mt.TextStyleId = styleId;
-                    mt.TextHeight = height;
-                    mt.Width = mtextWidth;
-                    mt.Normal = zAxis;
-                    mt.Direction = xAxis;
-                    mt.Attachment = AttachmentPoint.TopLeft;
-                    mt.Location = World(new Point2d(ix, iy), toWorld);
-                    ml.MText = mt;
-
-                    // un solo grupo de directriz; una linea por rama, de la punta al codo
-                    step = "anadir las lineas de directriz";
-                    int leaderIdx = ml.AddLeader();
-                    var lineIdx = new List<int>();
-                    for (int i = 0; i < lines.Count; i++)
-                    {
-                        int ln = ml.AddLeaderLine(leaderIdx);
-                        ml.AddFirstVertex(ln, World(lines[i][0], toWorld));
-                        for (int k = 1; k < lines[i].Count; k++)
-                            ml.AddLastVertex(ln, World(lines[i][k], toWorld));
-                        Arrow la = lineArrow[i];
-                        if (la != null)
-                        {
-                            // SOLID -> flecha cerrada rellena (simbolo nulo); bloque -> el mismo bloque
-                            Soft("ajustar la flecha de una rama", () =>
-                            {
-                                ml.SetArrowSize(ln, la.Size);
-                                ml.SetArrowSymbolId(ln, la.Symbol);
-                            });
-                        }
-                        lineIdx.Add(ln);
-                    }
-
-                    step = "configurar el rellano";
                     // subrayado solo si el original lo tenia; si no, enganche al centro,
                     // diga lo que diga el estilo
                     TextAttachmentType att = underline ? TextAttachmentType.AttachmentAllLine : TextAttachmentType.AttachmentMiddle;
-                    Soft("ajustar el enganche del texto", () =>
+
+                    // AutoCAD no acepta siempre la misma forma de anadir varias lineas a una
+                    // directriz (eInvalidContext). Se prueban, por orden, varias formas
+                    // documentadas, cada una sobre un MLEADER nuevo, y se usa la primera que
+                    // AutoCAD acepta. Con una sola linea, las formas 2 y 4 son la 1.
+                    step = "anadir las lineas de directriz";
+                    MLeader ml = null;
+                    List<int> lineIdx = null, clusters = null;
+                    var failures = new List<string>();
+                    for (int strategy = 1; strategy <= 4 && ml == null; strategy++)
                     {
-                        ml.SetTextAttachmentType(att, LeaderDirectionType.LeftLeader);
-                        ml.SetTextAttachmentType(att, LeaderDirectionType.RightLeader);
-                    });
-                    if (dogleg)
-                    {
-                        ml.EnableLanding = true;
-                        ml.EnableDogleg = true;
-                        Soft("ajustar el rellano", () => SetDoglegLength(ml, leaderIdx, xAxis * doglegDir, underline ? 0.0 : landLen, height));
+                        if (lines.Count == 1 && (strategy == 2 || strategy == 4)) continue;
+                        var aw = new List<string>();
+                        MLeader cand = null;
+                        try
+                        {
+                            cand = new MLeader();
+                            cand.SetDatabaseDefaults(db);
+                            if (!db.MLeaderstyle.IsNull) SoftTo(aw, "aplicar el estilo de directriz actual", () => cand.MLeaderStyle = db.MLeaderstyle);
+                            SoftTo(aw, "dejarla no anotativa", () => cand.Annotative = AnnotativeStates.False);
+                            // plano con su eje X a lo largo del texto: el rellano y el
+                            // subrayado siguen esa direccion
+                            SoftTo(aw, "orientar el plano de la directriz", () => cand.SetPlane(new Plane(textOrigin, xAxis, yAxis)));
+                            SoftTo(aw, "poner la escala general a 1", () => cand.Scale = 1.0);
+                            cand.ContentType = ContentType.MTextContent;
+                            cand.TextStyleId = styleId;
+                            cand.TextHeight = height;
+                            SoftTo(aw, "respetar el angulo del texto", () => cand.TextAngleType = TextAngleType.InsertAngle);
+                            SoftTo(aw, "ajustar la flecha", () =>
+                            {
+                                cand.ArrowSize = firstArrow != null ? firstArrow.Size : styleArrow;
+                                if (firstArrow != null) cand.ArrowSymbolId = firstArrow.Symbol;
+                            });
+                            SoftTo(aw, "ajustar la separacion del rellano", () => cand.LandingGap = gap);
+                            cand.Layer = textEnt.Layer;
+                            cand.Color = textEnt.Color;
+
+                            var mt = new MText();
+                            mt.SetDatabaseDefaults(db);
+                            mt.Contents = contents;
+                            mt.TextStyleId = styleId;
+                            mt.TextHeight = height;
+                            mt.Width = mtextWidth;
+                            mt.Normal = zAxis;
+                            mt.Direction = xAxis;
+                            mt.Attachment = AttachmentPoint.TopLeft;
+                            mt.Location = World(new Point2d(ix, iy), toWorld);
+                            cand.MText = mt;
+
+                            var li = new List<int>();
+                            var cl = new List<int>();
+                            if (strategy == 1)
+                            {
+                                // un grupo; cada linea se crea y se rellena por orden
+                                int ld = cand.AddLeader();
+                                cl.Add(ld);
+                                foreach (List<Point2d> l in lines)
+                                {
+                                    int ln = cand.AddLeaderLine(ld);
+                                    AddVertices(cand, ln, l, toWorld);
+                                    li.Add(ln);
+                                }
+                            }
+                            else if (strategy == 2)
+                            {
+                                // un grupo; primero todas las lineas, luego sus vertices
+                                int ld = cand.AddLeader();
+                                cl.Add(ld);
+                                foreach (List<Point2d> l in lines) li.Add(cand.AddLeaderLine(ld));
+                                for (int i = 0; i < lines.Count; i++) AddVertices(cand, li[i], lines[i], toWorld);
+                            }
+                            else if (strategy == 3)
+                            {
+                                // cada linea se crea por su punta y AutoCAD la asigna al grupo
+                                foreach (List<Point2d> l in lines)
+                                {
+                                    int ln = cand.AddLeaderLine(World(l[0], toWorld));
+                                    for (int k = 1; k < l.Count; k++) cand.AddLastVertex(ln, World(l[k], toWorld));
+                                    // si AutoCAD anadio un vertice propio, se dejan exactamente los nuestros
+                                    while (cand.VerticesCount(ln) > l.Count) cand.RemoveLastVertex(ln);
+                                    for (int k = 0; k < l.Count; k++) cand.SetVertex(ln, k, World(l[k], toWorld));
+                                    li.Add(ln);
+                                    int ld = cand.GetLeaderIndex(ln);
+                                    if (!cl.Contains(ld)) cl.Add(ld);
+                                }
+                            }
+                            else
+                            {
+                                // ultimo recurso: un grupo por rama, con los rellanos superpuestos
+                                foreach (List<Point2d> l in lines)
+                                {
+                                    int ld = cand.AddLeader();
+                                    cl.Add(ld);
+                                    int ln = cand.AddLeaderLine(ld);
+                                    AddVertices(cand, ln, l, toWorld);
+                                    li.Add(ln);
+                                }
+                            }
+
+                            for (int i = 0; i < lines.Count; i++)
+                            {
+                                Arrow la = lineArrow[i];
+                                int ln = li[i];
+                                if (la == null) continue;
+                                // SOLID -> flecha cerrada rellena (simbolo nulo); bloque -> el mismo bloque
+                                SoftTo(aw, "ajustar la flecha de una rama", () =>
+                                {
+                                    cand.SetArrowSize(ln, la.Size);
+                                    cand.SetArrowSymbolId(ln, la.Symbol);
+                                });
+                            }
+
+                            SoftTo(aw, "ajustar el enganche del texto", () =>
+                            {
+                                cand.SetTextAttachmentType(att, LeaderDirectionType.LeftLeader);
+                                cand.SetTextAttachmentType(att, LeaderDirectionType.RightLeader);
+                            });
+                            if (dogleg)
+                            {
+                                cand.EnableLanding = true;
+                                cand.EnableDogleg = true;
+                                foreach (int ld in cl)
+                                    SoftTo(aw, "ajustar el rellano", () => SetDoglegLength(cand, ld, xAxis * doglegDir, underline ? 0.0 : landLen, height));
+                            }
+                            else
+                            {
+                                cand.EnableDogleg = false;
+                                cand.EnableLanding = false;
+                            }
+
+                            ml = cand;
+                            lineIdx = li;
+                            clusters = cl;
+                            warnings.AddRange(aw);
+                        }
+                        catch (System.Exception ex)
+                        {
+                            failures.Add($"forma {strategy}: {ex.Message}");
+                            try { cand?.Dispose(); } catch (System.Exception) { }
+                        }
                     }
-                    else
-                    {
-                        ml.EnableDogleg = false;
-                        ml.EnableLanding = false;
-                    }
+                    if (ml == null) throw new System.Exception(string.Join("; ", failures));
 
                     step = "anadir la directriz al dibujo";
                     owner.AppendEntity(ml);
@@ -474,7 +591,8 @@ namespace DirectricesPlugin
                     if (dogleg && underline)
                     {
                         double w = ContentWidth(ml, toLocal) ?? oldBox.Width;
-                        Soft("ajustar el largo del rellano", () => SetDoglegLength(ml, leaderIdx, xAxis * doglegDir, landLen - w - gap, height));
+                        foreach (int ld in clusters)
+                            Soft("ajustar el largo del rellano", () => SetDoglegLength(ml, ld, xAxis * doglegDir, landLen - w - gap, height));
                     }
 
                     // ---------- 8. Enganchar: el final de las lineas, en el codo exacto ----------
@@ -506,6 +624,22 @@ namespace DirectricesPlugin
             foreach (string w in warnings)
                 ed.WriteMessage($"\nRDIR: aviso, no se pudo {w}.");
             return true;
+        }
+
+        /// <summary>Ejecuta un paso no imprescindible: si AutoCAD lo rechaza, lo anota
+        /// como aviso en lugar de cancelar la directriz.</summary>
+        private static void SoftTo(List<string> warnings, string what, Action a)
+        {
+            try { a(); }
+            catch (System.Exception ex) { warnings.Add($"{what} ({ex.Message})"); }
+        }
+
+        /// <summary>Vertices de una linea de directriz recien creada: la punta como
+        /// cabeza y el resto, por orden, hasta el codo.</summary>
+        private static void AddVertices(MLeader ml, int ln, List<Point2d> l, Matrix3d toWorld)
+        {
+            ml.AddFirstVertex(ln, World(l[0], toWorld));
+            for (int k = 1; k < l.Count; k++) ml.AddLastVertex(ln, World(l[k], toWorld));
         }
 
         /// <summary>Tramo paralelo al texto (eje X local), con 0,1 de tolerancia.</summary>

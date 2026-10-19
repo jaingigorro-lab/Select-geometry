@@ -150,7 +150,22 @@ siguiente. Si te pasa, mándame ese mensaje.
 
 ---
 
-## 5. Limitaciones
+## 5. Diagnóstico: comando `RDIRINFO`
+
+Si una directriz sale rara (por ejemplo, con el subrayado doble), escribe
+`RDIRINFO` y toca cada línea sospechosa. Para cada objeto dice:
+
+- si es **parte de una directriz múltiple** o un **objeto suelto** (una raya
+  original que no entró en la selección, por ejemplo);
+- si es una directriz múltiple: su estilo, escala, rellano, quiebro,
+  enganche del texto, número de líneas y el contenido del texto (con sus
+  códigos de formato).
+
+Copia lo que aparece en la línea de comandos y mándalo junto con la captura.
+
+---
+
+## 6. Limitaciones
 
 - **Ramas que se vuelven a dividir.** Las ramas se separan en un único codo,
   como en una directriz nativa. Si una rama se divide otra vez más adelante,
