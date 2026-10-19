@@ -88,9 +88,9 @@ ejecución.
 |---|---|---|
 | Texto | Sí, **solo uno** | `TEXT`, `MTEXT` |
 | Líneas | Sí, al menos una | `LINE`, `LWPOLYLINE`, `POLYLINE`, `LEADER` |
-| Flecha | No | `SOLID` (flecha rellena) o un bloque de flecha |
+| Flechas | No | `SOLID` (flecha rellena) o bloques de flecha, una por rama |
 
-Si no seleccionas la flecha, la directriz nueva usa la flecha del estilo de
+Si no seleccionas la flecha de una rama, esa rama usa la flecha del estilo de
 directriz múltiple actual, y la flecha vieja se queda en el dibujo.
 
 Los objetos en capas bloqueadas no se pueden seleccionar.
@@ -99,15 +99,22 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
 
 ## 4. Qué hace exactamente
 
-1. **Une todas las líneas seleccionadas en una sola cadena,** enganchando
-   cada vez el extremo más cercano. Si entre dos tramos hay un pequeño hueco,
-   lo salva con un tramo recto: no descarta ninguna línea. Los vértices
-   alineados en la misma dirección se quedan en uno.
-2. **Apoyo y punta:** el extremo de la cadena más cercano al texto es el
-   apoyo; el otro, la punta.
-3. **Flecha:**
-   - Si es un `SOLID`, la punta va a su vértice y el tamaño es su longitud.
-   - Si es un bloque, la punta va a su punto de inserción, el tamaño es su
+1. **Usa todas las líneas seleccionadas, tal cual.** Las une por los
+   extremos que coinciden. Los vértices alineados en la misma dirección se
+   quedan en uno.
+2. **Apoyo, codo y ramas:** el extremo libre más cercano al texto es el
+   apoyo. Desde ahí sigue la línea hasta el **codo**, el punto donde se separa
+   en varias ramas, o hasta la punta si no se separa.
+   - Si hay **varias flechas saliendo del mismo codo**, cada rama es una línea
+     de la **misma** directriz múltiple, todas unidas en el codo, como en una
+     directriz nativa con varias flechas.
+   - Si las líneas seleccionadas no se tocan entre sí, se avisa y se unen por
+     sus extremos más cercanos, sin descartar ninguna.
+3. **Flechas:** cada flecha seleccionada va a la rama cuya punta tiene más
+   cerca.
+   - Si es un `SOLID`: la punta va a su vértice, el tamaño es su longitud y el
+     tipo es flecha cerrada rellena.
+   - Si es un bloque: la punta va a su punto de inserción, el tamaño es su
      escala y el símbolo es ese mismo bloque.
 4. **Rellano:** si el tramo junto al texto es paralelo al texto, se convierte
    en el rellano de la directriz múltiple:
@@ -117,7 +124,9 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
    - Si la raya **acababa junto al texto**, queda un rellano normal, con el
      texto a continuación y centrado en su altura.
 
-   Si no hay rellano, el texto se coloca en el mismo sitio que el original.
+   El texto se coloca como lo haría AutoCAD en una directriz nativa, y se
+   desplaza hasta que el final de las líneas cae **exactamente en el codo
+   original**. Si no hay rellano, el texto queda junto al apoyo, donde estaba.
 5. **Texto:** misma altura real. La directriz se deja **no anotativa** y con
    escala general 1, para que AutoCAD no multiplique la altura por ninguna
    escala.
@@ -130,9 +139,9 @@ comando lo avisa y sigue con la siguiente.
 
 ## 5. Limitaciones
 
-- **Una sola rama por directriz.** Una directriz con varias flechas que salen
-  del mismo texto no se reconstruye bien. Hazla en varias pasadas, una por
-  rama, o selecciona una rama sola.
+- **Ramas que se vuelven a dividir.** Las ramas se separan en un único codo,
+  como en una directriz nativa. Si una rama se divide otra vez más adelante,
+  cada camino hasta una punta se dibuja como una línea entera.
 - **Arcos en polilíneas:** los tramos curvos pasan a ser rectos entre sus
   vértices.
 - **Posición fina del texto:** según el estilo (separación del rellano),
