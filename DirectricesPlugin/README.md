@@ -9,13 +9,14 @@ Es la versión en C# de `RDIRX.lsp`, pensada para que el resultado sea
 - **No adivina nada.** Reconstruyes **una directriz cada vez**, seleccionando
   sus piezas, y usa **exactamente las líneas que seleccionas**: ni una más ni
   una menos.
-- **El texto queda igual que el original:** mismo contenido, altura, estilo de
-  texto, capa, color, plano y ángulo. Además se coloca en el mismo sitio.
+- **El texto conserva el original:** mismo contenido, altura, estilo de texto,
+  capa, color y ángulo. Y queda **siempre legible**: nunca boca abajo.
 - **La flecha queda igual que la original:** misma punta y mismo tamaño y, si
   era un bloque (punto, trazo de arquitectura...), el mismo símbolo.
 - **La orientación no depende del SCU ni del estilo.** La directriz se
-  construye en el sistema del propio texto y se lleva a su sitio con una sola
-  transformación.
+  construye directamente en su sitio, en el plano del SCP actual y con su eje
+  X a lo largo del texto. Así el rellano y el subrayado siguen al texto y no a
+  la horizontal del SCU.
 
 ---
 
@@ -61,9 +62,15 @@ seguirás usando la versión anterior.
 
 1. Escribe `RDIR`.
 2. **Orientación del texto** `[Original/Scp] <Original>`:
-   - **Original** *(por defecto)*: el texto conserva el plano y el ángulo del
-     texto original, y queda en el mismo sitio.
+   - **Original** *(por defecto)*: el texto conserva el ángulo con el que **se
+     ve** el texto original en el SCP actual.
    - **Scp**: el texto queda horizontal en el SCP actual.
+
+   En los dos casos el texto queda **legible**: si con ese ángulo se leería
+   boca abajo (de arriba abajo o de derecha a izquierda), se gira 180°. Es la
+   regla de siempre en los planos: el texto se lee desde abajo o desde la
+   derecha. Así da igual cómo estuviera guardado el texto original: girado
+   180°, reflejado por una simetría o con la normal invertida.
 
    Se recuerda la última elección durante la sesión.
 3. **Selecciona las piezas de UNA directriz:** su texto, sus líneas o
@@ -102,10 +109,15 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
    - Si es un `SOLID`, la punta va a su vértice y el tamaño es su longitud.
    - Si es un bloque, la punta va a su punto de inserción, el tamaño es su
      escala y el símbolo es ese mismo bloque.
-4. **Rellano:** si el tramo junto al texto es horizontal respecto al texto, se
-   convierte en el rellano de la directriz múltiple:
-   - Si el texto estaba **encima de la raya**, el texto queda **subrayado**.
-   - Si estaba **al lado**, queda un rellano normal.
+4. **Rellano:** si el tramo junto al texto es paralelo al texto, se convierte
+   en el rellano de la directriz múltiple:
+   - Si la raya iba **a lo largo del texto** (texto escrito sobre la raya), el
+     texto queda **subrayado y encima de la raya**, en su lado legible, a
+     continuación del codo.
+   - Si la raya **acababa junto al texto**, queda un rellano normal, con el
+     texto a continuación y centrado en su altura.
+
+   Si no hay rellano, el texto se coloca en el mismo sitio que el original.
 5. **Texto:** misma altura real. La directriz se deja **no anotativa** y con
    escala general 1, para que AutoCAD no multiplique la altura por ninguna
    escala.
@@ -123,9 +135,11 @@ comando lo avisa y sigue con la siguiente.
   rama, o selecciona una rama sola.
 - **Arcos en polilíneas:** los tramos curvos pasan a ser rectos entre sus
   vértices.
-- **Posición fina del texto:** el texto se coloca con su esquina superior
-  izquierda donde estaba la del original. Según el estilo (separación del
-  rellano), AutoCAD puede ajustar ligeramente el último tramo para enganchar
-  la línea al texto.
+- **Posición fina del texto:** según el estilo (separación del rellano),
+  AutoCAD puede ajustar ligeramente el último tramo para enganchar la línea al
+  texto.
+- **Lo que no seleccionas se queda.** Si después de `RDIR` ves una línea
+  suelta junto a la directriz nueva, es que no estaba en la selección: bórrala
+  o repite incluyéndola.
 - **Formato manual del texto:** se conserva tal cual estaba en el original.
   Si quieres limpiarlo, usa `StripMtext` (`SMT`) sobre las directrices nuevas.

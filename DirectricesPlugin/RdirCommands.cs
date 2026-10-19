@@ -27,15 +27,17 @@ namespace DirectricesPlugin
     //     la punta, el tamano y, si es un bloque, el mismo simbolo de flecha.
     // Despues vuelve a pedir la siguiente directriz, hasta pulsar Intro.
     //
-    // Orientacion del texto:
-    //   - Original (por defecto): el texto nuevo conserva el plano y el angulo
-    //     del texto original, y se coloca en el mismo sitio.
-    //   - Scp: el texto queda horizontal en el SCP actual.
+    // Orientacion del texto, siempre en el plano del SCP actual:
+    //   - Original (por defecto): el angulo con el que se VE el texto original.
+    //   - Scp: horizontal en el SCP.
+    // En los dos casos el texto queda LEGIBLE: si el angulo lo dejaria boca
+    // abajo (leyendose de arriba abajo o de derecha a izquierda), se gira 180
+    // grados. Asi da igual como estuviera guardado el texto original (girado
+    // 180, reflejado por una simetria, con la normal invertida...).
     //
-    // Toda la directriz se construye en un sistema local (X = direccion del
-    // texto, Z = normal del texto o del SCP) sobre el plano XY universal, con
-    // el texto a 0 grados, y al final se lleva a su sitio real con un unico
-    // TransformBy: asi la orientacion no depende del SCU ni del estilo.
+    // El MLEADER se construye directamente en su sitio, con su PLANO apoyado
+    // en la direccion del texto (MLeader.SetPlane): el rellano y el subrayado
+    // van en esa direccion, no en la horizontal del SCU.
     // ==========================================================
     public class RdirCommands
     {
@@ -111,6 +113,9 @@ namespace DirectricesPlugin
                 }
             }
             public double Width => MaxX - MinX;
+            public double Height => MaxY - MinY;
+            public double MidX => 0.5 * (MinX + MaxX);
+            public double MidY => 0.5 * (MinY + MaxY);
             public double DistanceTo(Point2d p)
             {
                 double dx = Math.Max(0.0, Math.Max(MinX - p.X, p.X - MaxX));
@@ -152,7 +157,7 @@ namespace DirectricesPlugin
                 string contents;
                 double height, mtextWidth = 0.0;
                 ObjectId styleId;
-                Vector3d textNormal, textXDir;
+                Vector3d textXDir;
                 Point3d textOrigin;
                 if (textEnt is DBText dt)
                 {
@@ -161,7 +166,6 @@ namespace DirectricesPlugin
                         contents = "{\\W" + dt.WidthFactor.ToString("0.####", CultureInfo.InvariantCulture) + ";" + contents + "}";
                     height = dt.Height;
                     styleId = dt.TextStyleId;
-                    textNormal = dt.Normal;
                     textXDir = Vector3d.XAxis.RotateBy(dt.Rotation, Vector3d.ZAxis).TransformBy(Matrix3d.PlaneToWorld(dt.Normal));
                     textOrigin = dt.Position;
                 }
@@ -171,42 +175,37 @@ namespace DirectricesPlugin
                     contents = omt.Contents;
                     height = omt.TextHeight;
                     styleId = omt.TextStyleId;
-                    textNormal = omt.Normal;
                     textXDir = omt.Direction;
                     textOrigin = omt.Location;
                     mtextWidth = omt.Width;
                 }
 
-                // ---------- 3. Sistema local ----------
-                Vector3d zAxis, xAxis;
-                if (keepAngle)
-                {
-                    zAxis = textNormal.GetNormal();
-                    xAxis = textXDir;
-                }
-                else
-                {
-                    CoordinateSystem3d ucs = ed.CurrentUserCoordinateSystem.CoordinateSystem3d;
-                    zAxis = ucs.Zaxis.GetNormal();
-                    xAxis = ucs.Xaxis;
-                }
-                xAxis = (xAxis - zAxis * xAxis.DotProduct(zAxis)).GetNormal();
+                // ---------- 3. Sistema del texto nuevo: plano del SCP, legible ----------
+                CoordinateSystem3d ucs = ed.CurrentUserCoordinateSystem.CoordinateSystem3d;
+                Vector3d zAxis = ucs.Zaxis.GetNormal();
+                Vector3d ux = ucs.Xaxis.GetNormal(), uy = ucs.Yaxis.GetNormal();
+                Vector3d xAxis = keepAngle ? textXDir : ux;
+                xAxis = xAxis - zAxis * xAxis.DotProduct(zAxis);   // proyectado al plano del SCP
+                xAxis = xAxis.Length > 1e-9 ? xAxis.GetNormal() : ux;
+                double angInUcs = Math.Atan2(xAxis.DotProduct(uy), xAxis.DotProduct(ux));
+                if (angInUcs > Math.PI / 2.0 + 1e-6 || angInUcs <= -Math.PI / 2.0 + 1e-6)
+                    xAxis = -xAxis;                                // si no, se leeria boca abajo
                 Vector3d yAxis = zAxis.CrossProduct(xAxis).GetNormal();
                 Matrix3d toWorld = Matrix3d.AlignCoordinateSystem(
                     Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis, Vector3d.ZAxis,
                     textOrigin, xAxis, yAxis, zAxis);
                 Matrix3d toLocal = toWorld.Inverse();
 
-                // Rectangulo del texto en el sistema local (el texto original se
-                // transforma aqui mismo: se borra al final de todos modos).
+                // Rectangulo que ocupaba el texto original, en ese sistema (el
+                // original se transforma aqui mismo: se borra al final de todos modos).
                 textEnt.TransformBy(toLocal);
-                Box textBox;
+                Box oldBox;
                 if (textEnt is MText lmt)
-                    textBox = new Box(lmt.GetBoundingPoints().Cast<Point3d>());
+                    oldBox = new Box(lmt.GetBoundingPoints().Cast<Point3d>());
                 else
                 {
                     Extents3d ext = textEnt.GeometricExtents;
-                    textBox = new Box(new[] { ext.MinPoint, ext.MaxPoint });
+                    oldBox = new Box(new[] { ext.MinPoint, ext.MaxPoint });
                 }
 
                 // ---------- 4. Cadena con EXACTAMENTE las lineas seleccionadas ----------
@@ -227,7 +226,7 @@ namespace DirectricesPlugin
                     return false;
                 }
                 // pts va del apoyo (extremo junto al texto) a la punta
-                if (textBox.DistanceTo(pts[pts.Count - 1]) < textBox.DistanceTo(pts[0])) pts.Reverse();
+                if (oldBox.DistanceTo(pts[pts.Count - 1]) < oldBox.DistanceTo(pts[0])) pts.Reverse();
 
                 // ---------- 5. Flecha seleccionada: punta, tamano y simbolo ----------
                 double? arrowSize = null;
@@ -263,35 +262,38 @@ namespace DirectricesPlugin
                 }
                 pts[pts.Count - 1] = tip;
 
-                // ---------- 6. Rellano: tramo horizontal junto al texto ----------
+                // ---------- 6. Rellano: tramo paralelo al texto, junto al texto ----------
+                // underline: la raya va a lo largo del texto (texto escrito sobre ella)
+                // side: la raya acaba junto al texto (rellano normal)
                 bool dogleg = false, underline = false;
-                double doglegLength = 0.0, doglegDir = 1.0;
+                double doglegLength = 0.0, doglegDir = 1.0, lineY = 0.0;
+                Point2d land = pts[0], knee = pts[0];
                 if (pts.Count >= 3)
                 {
-                    Point2d land = pts[0], knee = pts[1];
+                    land = pts[0];
+                    knee = pts[1];
                     double dx = land.X - knee.X, dy = land.Y - knee.Y;
                     if (Math.Abs(dx) > 1e-9 && Math.Abs(dy) <= 0.1 * Math.Abs(dx))
                     {
                         dogleg = true;
                         doglegDir = dx > 0 ? 1.0 : -1.0;
+                        lineY = 0.5 * (land.Y + knee.Y);
                         double segMin = Math.Min(land.X, knee.X), segMax = Math.Max(land.X, knee.X);
-                        double overlap = Math.Min(segMax, textBox.MaxX) - Math.Max(segMin, textBox.MinX);
-                        double lineY = 0.5 * (land.Y + knee.Y);
-                        // texto escrito ENCIMA de la raya -> texto subrayado
-                        underline = overlap > 0.5 * textBox.Width && lineY <= textBox.MinY + 0.5 * height;
-                        doglegLength = underline
-                            ? Math.Max(0.0, doglegDir > 0 ? textBox.MinX - knee.X : knee.X - textBox.MaxX)
-                            : Math.Abs(dx);
+                        double overlap = Math.Min(segMax, oldBox.MaxX) - Math.Max(segMin, oldBox.MinX);
+                        underline = overlap > 0.5 * oldBox.Width;
                         pts.RemoveAt(0);
                     }
                 }
 
-                // ---------- 7. Crear el MLEADER en el sistema local ----------
+                // ---------- 7. Crear el MLEADER directamente en su sitio ----------
                 var owner = (BlockTableRecord)tr.GetObject(textEnt.BlockId, OpenMode.ForWrite);
                 var ml = new MLeader();
                 ml.SetDatabaseDefaults(db);
                 if (!db.MLeaderstyle.IsNull) ml.MLeaderStyle = db.MLeaderstyle;
                 ml.Annotative = AnnotativeStates.False;
+                // plano del MLEADER con su eje X a lo largo del texto: el rellano y
+                // el subrayado siguen esa direccion
+                ml.SetPlane(new Plane(textOrigin, xAxis, yAxis));
 
                 // Todo en unidades reales del dibujo (escala 1), para que la altura
                 // del texto sea exactamente la del original.
@@ -315,28 +317,34 @@ namespace DirectricesPlugin
                 mt.TextStyleId = styleId;
                 mt.TextHeight = height;
                 mt.Width = mtextWidth;
+                mt.Normal = zAxis;
+                mt.Direction = xAxis;
                 mt.Attachment = AttachmentPoint.TopLeft;
-                mt.Location = new Point3d(textBox.MinX, textBox.MaxY, 0.0);
-                mt.Rotation = 0.0;
+                mt.Location = new Point3d(oldBox.MinX, oldBox.MaxY, 0.0).TransformBy(toWorld);
                 ml.MText = mt;
 
                 // pts[0] = conexion con el texto ... pts[n-1] = punta de flecha
-                int lineIdx = ml.AddLeaderLine(new Point3d(pts[0].X, pts[0].Y, 0.0));
+                int lineIdx = ml.AddLeaderLine(World(pts[0], toWorld));
                 for (int i = 1; i < pts.Count; i++)
-                    ml.AddFirstVertex(lineIdx, new Point3d(pts[i].X, pts[i].Y, 0.0));
+                    ml.AddFirstVertex(lineIdx, World(pts[i], toWorld));
 
                 int leaderIdx = ml.GetLeaderIndex(lineIdx);
                 if (dogleg)
                 {
                     ml.EnableLanding = true;
                     ml.EnableDogleg = true;
-                    ml.SetDogleg(leaderIdx, new Vector3d(doglegDir, 0.0, 0.0));
-                    ml.DoglegLength = doglegLength;
+                    ml.SetDogleg(leaderIdx, xAxis * doglegDir);
+                    TextAttachmentType att = underline ? TextAttachmentType.AttachmentAllLine : TextAttachmentType.AttachmentMiddle;
+                    ml.SetTextAttachmentType(att, LeaderDirectionType.LeftLeader);
+                    ml.SetTextAttachmentType(att, LeaderDirectionType.RightLeader);
                     if (underline)
                     {
-                        ml.SetTextAttachmentType(TextAttachmentType.AttachmentAllLine, LeaderDirectionType.LeftLeader);
-                        ml.SetTextAttachmentType(TextAttachmentType.AttachmentAllLine, LeaderDirectionType.RightLeader);
+                        // el texto empieza donde empezaba el original, o justo tras el codo
+                        double startGap = doglegDir > 0 ? oldBox.MinX - knee.X : knee.X - oldBox.MaxX;
+                        doglegLength = Math.Max(0.0, startGap - gap);
                     }
+                    else doglegLength = Math.Abs(land.X - knee.X);
+                    ml.DoglegLength = doglegLength;
                 }
                 else
                 {
@@ -347,11 +355,32 @@ namespace DirectricesPlugin
                 owner.AppendEntity(ml);
                 tr.AddNewlyCreatedDBObject(ml, true);
 
-                // Texto en el mismo sitio que el original (esquina superior izquierda)
-                PlaceText(ml, textBox);
-
-                // ---------- 8. Llevar el MLEADER a su sitio real ----------
-                ml.TransformBy(toWorld);
+                // ---------- 8. Colocar el texto ----------
+                Box? cur = ContentBox(ml, toLocal);
+                if (cur.HasValue)
+                {
+                    double w = cur.Value.Width, h = cur.Value.Height;
+                    double minX, minY;
+                    if (dogleg && underline)
+                    {
+                        // ENCIMA de la raya (en el lado legible), a continuacion del rellano
+                        minX = doglegDir > 0 ? knee.X + doglegLength + gap : knee.X - doglegLength - gap - w;
+                        minY = lineY + gap;
+                    }
+                    else if (dogleg)
+                    {
+                        // a continuacion del rellano, centrado en su altura
+                        minX = doglegDir > 0 ? land.X + gap : land.X - gap - w;
+                        minY = lineY - 0.5 * h;
+                    }
+                    else
+                    {
+                        // en el mismo sitio que el original
+                        minX = oldBox.MidX - 0.5 * w;
+                        minY = oldBox.MidY - 0.5 * h;
+                    }
+                    MoveTextTo(ml, toLocal, toWorld, minX, minY);
+                }
 
                 // ---------- 9. Borrar las piezas sueltas ----------
                 textEnt.Erase();
@@ -363,23 +392,31 @@ namespace DirectricesPlugin
             }
         }
 
-        /// <summary>Mueve el texto del MLEADER para que su esquina superior izquierda
-        /// coincida con la del texto original (en el sistema local).</summary>
-        private static void PlaceText(MLeader ml, Box target)
+        private static Point3d World(Point2d p, Matrix3d toWorld) =>
+            new Point3d(p.X, p.Y, 0.0).TransformBy(toWorld);
+
+        /// <summary>Rectangulo que ocupa el texto del MLEADER, en el sistema local.</summary>
+        private static Box? ContentBox(MLeader ml, Matrix3d toLocal)
+        {
+            try
+            {
+                using (MText m = ml.MText)
+                    return new Box(m.GetBoundingPoints().Cast<Point3d>().Select(p => p.TransformBy(toLocal)));
+            }
+            catch (System.Exception) { return null; }
+        }
+
+        /// <summary>Mueve el texto del MLEADER hasta que su esquina inferior izquierda
+        /// (en el sistema local) quede en (minX, minY).</summary>
+        private static void MoveTextTo(MLeader ml, Matrix3d toLocal, Matrix3d toWorld, double minX, double minY)
         {
             for (int pass = 0; pass < 2; pass++)
             {
-                Box cur;
-                try
-                {
-                    using (MText m = ml.MText)
-                        cur = new Box(m.GetBoundingPoints().Cast<Point3d>());
-                }
-                catch (System.Exception) { return; }
-
-                var delta = new Vector3d(target.MinX - cur.MinX, target.MaxY - cur.MaxY, 0.0);
+                Box? cur = ContentBox(ml, toLocal);
+                if (!cur.HasValue) return;
+                var delta = new Vector3d(minX - cur.Value.MinX, minY - cur.Value.MinY, 0.0);
                 if (delta.Length < 1e-9) return;
-                ml.TextLocation = ml.TextLocation + delta;
+                ml.TextLocation = ml.TextLocation + delta.TransformBy(toWorld);
             }
         }
 
