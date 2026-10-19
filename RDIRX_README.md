@@ -15,6 +15,11 @@ Cada directriz nueva conserva:
 
 Las piezas sueltas originales se borran al terminar.
 
+> **Versión .NET más exacta:** si necesitas que se usen exactamente las líneas
+> que seleccionas y que el texto conserve su orientación sin sorpresas, usa el
+> plugin de Visual Studio `DirectricesPlugin` (comando `RDIR`). Mira
+> `DirectricesPlugin/README.md`.
+
 ---
 
 ## Cuándo usarlo
