@@ -77,27 +77,48 @@ Los objetos en **capas bloqueadas** se ignoran: ni se usan ni se borran.
 
 ## Cómo decide qué va con qué
 
-1. **Texto ↔ línea.** Para cada texto busca las líneas con un extremo a menos
-   de **4 alturas de texto** del contorno del texto. Empareja primero las
-   parejas más cercanas de todo el lote. Así, directrices muy juntas no se
-   quitan la línea unas a otras.
-2. **Cadena completa.** Desde esa primera línea sigue los tramos que empiezan
-   donde termina el anterior, con una tolerancia de 0,1 alturas de texto,
-   hasta llegar a la punta. Así conserva los codos.
-3. **Flecha.** Busca un `SOLID` o un `INSERT` pegado a la punta, a menos de
+1. **Cadenas.** Primero une las líneas y polilíneas que se tocan por sus
+   extremos (tolerancia: 0,1 veces la altura de texto más pequeña), en los dos
+   sentidos. Cada directriz original queda como una sola cadena con todos sus
+   codos.
+2. **Texto ↔ cadena.** Para cada texto busca la cadena con un **extremo** a
+   menos de **4 alturas de texto** del rectángulo **real** del texto, girado
+   con él. No usa la caja alineada con el SCU, que en un texto girado es
+   enorme y tocaría líneas ajenas. Empareja primero las parejas más cercanas
+   de todo el lote, sin repetir texto ni cadena.
+3. **Apoyo y punta.** El extremo de la cadena pegado al texto es el apoyo; el
+   otro, la punta.
+4. **Flecha.** Busca un `SOLID` o un `INSERT` pegado a la punta, a menos de
    2 alturas de texto. Un `INSERT` solo cuenta como flecha si es **pequeño**
    (menos de 4 alturas de texto de tamaño), para no borrar un bloque normal
    que se haya colado en la selección. Si la línea acababa en la base de un
    `SOLID`, la punta nueva se coloca en el vértice real de la flecha.
 
+## Orientación del texto
+
+La directriz nueva se crea en el **sistema del propio texto original** (su
+plano y su ángulo), no en el SCU. El texto queda orientado igual que estaba,
+aunque se hubiera escrito en un SCP girado o con el plano invertido ("visto
+desde abajo").
+
+## Texto apoyado sobre una línea (subrayado)
+
+Si el tramo junto al texto es una línea **horizontal respecto al texto** (el
+típico texto escrito encima de una raya, con la diagonal saliendo de un
+extremo), ese tramo se convierte en el **rellano** de la directriz múltiple y
+el texto queda **subrayado**, como en el original. Así la directriz se
+comporta como una nativa: si mueves el texto, el subrayado lo acompaña.
+
 ---
 
 ## Limitaciones y consejos
 
-- **Sin rellano extra.** La directriz se crea sin rellano horizontal, para
-  respetar la forma original, y el texto se apoya en el último punto de la
-  línea. Si lo quieres, selecciona las directrices y en Propiedades pon
-  **Rellano horizontal: Sí**.
+- **Posición del texto.** La directriz múltiple coloca el texto junto a su
+  apoyo según su estilo (separación, enganche), así que puede quedar
+  ligeramente desplazado respecto al original. La orientación sí se conserva.
+- **Sin subrayado no hay rellano.** Si el último tramo no es horizontal
+  respecto al texto, la directriz se crea sin rellano, apoyando el texto en el
+  último punto. Si lo quieres, en Propiedades pon **Rellano horizontal: Sí**.
 - **Texto lejos de la línea.** Si un texto queda a más de 4 alturas de texto
   de su línea, no se empareja y se queda sin tocar. Acerca el texto o pide que
   se amplíe esa distancia.
