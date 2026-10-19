@@ -153,281 +153,401 @@ namespace DirectricesPlugin
 
         private static bool Rebuild(Database db, Editor ed, ObjectId[] ids, bool keepAngle)
         {
+            string step = "leer la seleccion";
+            var warnings = new List<string>();
+            // Pasos no imprescindibles: si AutoCAD rechaza alguno, se avisa y se sigue
+            void Soft(string what, Action a)
+            {
+                try { a(); }
+                catch (System.Exception ex) { warnings.Add($"{what} ({ex.Message})"); }
+            }
+
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                // ---------- 1. Clasificar exactamente lo seleccionado ----------
-                Entity textEnt = null;
-                var curves = new List<Curve>();
-                var arrowEnts = new List<Entity>();
-                foreach (ObjectId id in ids)
+                try
                 {
-                    var ent = (Entity)tr.GetObject(id, OpenMode.ForWrite);
-                    if (ent is DBText || ent is MText)
+                    // ---------- 1. Clasificar exactamente lo seleccionado ----------
+                    Entity textEnt = null;
+                    var curves = new List<Curve>();
+                    var arrowEnts = new List<Entity>();
+                    foreach (ObjectId id in ids)
                     {
-                        if (textEnt != null)
+                        var ent = (Entity)tr.GetObject(id, OpenMode.ForWrite);
+                        if (ent is DBText || ent is MText)
                         {
-                            ed.WriteMessage("\nRDIR: has seleccionado mas de un texto. Selecciona solo las piezas de una directriz.");
-                            return false;
+                            if (textEnt != null)
+                            {
+                                ed.WriteMessage("\nRDIR: has seleccionado mas de un texto. Selecciona solo las piezas de una directriz.");
+                                return false;
+                            }
+                            textEnt = ent;
                         }
-                        textEnt = ent;
+                        else if (ent is Curve c) curves.Add(c);
+                        else arrowEnts.Add(ent);
                     }
-                    else if (ent is Curve c) curves.Add(c);
-                    else arrowEnts.Add(ent);
-                }
-                if (textEnt == null || curves.Count == 0)
-                {
-                    ed.WriteMessage("\nRDIR: la seleccion debe incluir un texto y al menos una linea.");
-                    return false;
-                }
-
-                // ---------- 2. Datos del texto original ----------
-                string contents;
-                double height, mtextWidth = 0.0;
-                ObjectId styleId;
-                Vector3d textXDir;
-                Point3d textOrigin;
-                if (textEnt is DBText dt)
-                {
-                    contents = DbTextToMText(dt.TextString);
-                    if (Math.Abs(dt.WidthFactor - 1.0) > 1e-6)
-                        contents = "{\\W" + dt.WidthFactor.ToString("0.####", CultureInfo.InvariantCulture) + ";" + contents + "}";
-                    height = dt.Height;
-                    styleId = dt.TextStyleId;
-                    textXDir = Vector3d.XAxis.RotateBy(dt.Rotation, Vector3d.ZAxis).TransformBy(Matrix3d.PlaneToWorld(dt.Normal));
-                    textOrigin = dt.Position;
-                }
-                else
-                {
-                    var omt = (MText)textEnt;
-                    contents = omt.Contents;
-                    height = omt.TextHeight;
-                    styleId = omt.TextStyleId;
-                    textXDir = omt.Direction;
-                    textOrigin = omt.Location;
-                    mtextWidth = omt.Width;
-                }
-
-                // ---------- 3. Sistema del texto nuevo: plano del SCP, legible ----------
-                CoordinateSystem3d ucs = ed.CurrentUserCoordinateSystem.CoordinateSystem3d;
-                Vector3d zAxis = ucs.Zaxis.GetNormal();
-                Vector3d ux = ucs.Xaxis.GetNormal(), uy = ucs.Yaxis.GetNormal();
-                Vector3d xAxis = keepAngle ? textXDir : ux;
-                xAxis = xAxis - zAxis * xAxis.DotProduct(zAxis);   // proyectado al plano del SCP
-                xAxis = xAxis.Length > 1e-9 ? xAxis.GetNormal() : ux;
-                double angInUcs = Math.Atan2(xAxis.DotProduct(uy), xAxis.DotProduct(ux));
-                if (angInUcs > Math.PI / 2.0 + 1e-6 || angInUcs <= -Math.PI / 2.0 + 1e-6)
-                    xAxis = -xAxis;                                // si no, se leeria boca abajo
-                Vector3d yAxis = zAxis.CrossProduct(xAxis).GetNormal();
-                Matrix3d toWorld = Matrix3d.AlignCoordinateSystem(
-                    Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis, Vector3d.ZAxis,
-                    textOrigin, xAxis, yAxis, zAxis);
-                Matrix3d toLocal = toWorld.Inverse();
-
-                // Rectangulo que ocupaba el texto original, en ese sistema (el
-                // original se transforma aqui mismo: se borra al final de todos modos).
-                textEnt.TransformBy(toLocal);
-                Box oldBox;
-                if (textEnt is MText lmt)
-                    oldBox = new Box(lmt.GetBoundingPoints().Cast<Point3d>());
-                else
-                {
-                    Extents3d ext = textEnt.GeometricExtents;
-                    oldBox = new Box(new[] { ext.MinPoint, ext.MaxPoint });
-                }
-
-                // ---------- 4. Lineas de directriz con EXACTAMENTE lo seleccionado ----------
-                var pieces = curves
-                    .Select(c => Simplify(GetVertices(c).Select(p => ToLocal2d(p, toLocal)).ToList()))
-                    .Where(p => p.Count >= 2)
-                    .ToList();
-                if (pieces.Count == 0)
-                {
-                    ed.WriteMessage("\nRDIR: las lineas seleccionadas no tienen longitud.");
-                    return false;
-                }
-
-                // trunk = del apoyo (junto al texto) al codo; lines = cada rama, de su
-                // punta al apoyo (cabeza -> cola, como las quiere el MLEADER)
-                List<Point2d> trunk;
-                List<List<Point2d>> lines;
-                double tol = Math.Max(1e-6, height * 1e-3);
-                if (!BuildTree(pieces, oldBox, tol, out trunk, out lines))
-                {
-                    // las lineas no se tocan: se unen por los extremos mas proximos
-                    ed.WriteMessage("\nRDIR: aviso, las lineas seleccionadas no se tocan; se unen por sus extremos mas cercanos.");
-                    List<Point2d> chain = Simplify(JoinPieces(pieces));
-                    if (oldBox.DistanceTo(chain[chain.Count - 1]) < oldBox.DistanceTo(chain[0])) chain.Reverse();
-                    trunk = chain;
-                    var single = new List<Point2d>(chain);
-                    single.Reverse();
-                    lines = new List<List<Point2d>> { single };
-                }
-
-                // ---------- 5. Rellano: primer tramo del tronco, paralelo al texto ----------
-                // underline: la raya va a lo largo del texto (texto escrito sobre ella)
-                // side: la raya acaba junto al texto (rellano normal)
-                bool dogleg = false, underline = false;
-                double doglegDir = 1.0, landLen = 0.0;
-                Point2d land = trunk[0];
-                Point2d tail = trunk[0];
-                if (trunk.Count >= 2 && lines.All(l => l.Count >= 3))
-                {
-                    Point2d knee = trunk[1];
-                    double dx = land.X - knee.X, dy = land.Y - knee.Y;
-                    if (Math.Abs(dx) > 1e-9 && Math.Abs(dy) <= 0.1 * Math.Abs(dx))
+                    if (textEnt == null || curves.Count == 0)
                     {
-                        dogleg = true;
-                        doglegDir = dx > 0 ? 1.0 : -1.0;
-                        landLen = Math.Abs(dx);
-                        double segMin = Math.Min(land.X, knee.X), segMax = Math.Max(land.X, knee.X);
-                        double overlap = Math.Min(segMax, oldBox.MaxX) - Math.Max(segMin, oldBox.MinX);
-                        underline = overlap > 0.5 * oldBox.Width;
-                        tail = knee;
-                        foreach (List<Point2d> l in lines) l.RemoveAt(l.Count - 1);   // quitar el apoyo
+                        ed.WriteMessage("\nRDIR: la seleccion debe incluir un texto y al menos una linea.");
+                        return false;
                     }
-                }
 
-                // ---------- 6. Flechas: cada una a la rama de punta mas cercana ----------
-                var arrows = arrowEnts.Select(a => ReadArrow(a, toLocal)).Where(a => a != null).ToList();
-                var lineArrow = new Arrow[lines.Count];
-                foreach (Arrow a in arrows)
-                {
-                    int best = -1;
-                    double bestD = double.MaxValue;
+                    // ---------- 2. Datos del texto original ----------
+                    step = "leer el texto";
+                    string contents;
+                    bool textUnderlined;
+                    double height, mtextWidth = 0.0;
+                    ObjectId styleId;
+                    Vector3d textXDir;
+                    Point3d textOrigin;
+                    if (textEnt is DBText dt)
+                    {
+                        contents = DbTextToMText(dt.TextString, out textUnderlined);
+                        if (Math.Abs(dt.WidthFactor - 1.0) > 1e-6)
+                            contents = "{\\W" + dt.WidthFactor.ToString("0.####", CultureInfo.InvariantCulture) + ";" + contents + "}";
+                        height = dt.Height;
+                        styleId = dt.TextStyleId;
+                        textXDir = Vector3d.XAxis.RotateBy(dt.Rotation, Vector3d.ZAxis).TransformBy(Matrix3d.PlaneToWorld(dt.Normal));
+                        textOrigin = dt.Position;
+                    }
+                    else
+                    {
+                        var omt = (MText)textEnt;
+                        contents = StripMTextUnderline(omt.Contents, out textUnderlined);
+                        height = omt.TextHeight;
+                        styleId = omt.TextStyleId;
+                        textXDir = omt.Direction;
+                        textOrigin = omt.Location;
+                        mtextWidth = omt.Width;
+                    }
+
+                    // ---------- 3. Sistema del texto nuevo: plano del SCP, legible ----------
+                    CoordinateSystem3d ucs = ed.CurrentUserCoordinateSystem.CoordinateSystem3d;
+                    Vector3d zAxis = ucs.Zaxis.GetNormal();
+                    Vector3d ux = ucs.Xaxis.GetNormal(), uy = ucs.Yaxis.GetNormal();
+                    Vector3d xAxis = keepAngle ? textXDir : ux;
+                    xAxis = xAxis - zAxis * xAxis.DotProduct(zAxis);   // proyectado al plano del SCP
+                    xAxis = xAxis.Length > 1e-9 ? xAxis.GetNormal() : ux;
+                    double angInUcs = Math.Atan2(xAxis.DotProduct(uy), xAxis.DotProduct(ux));
+                    if (angInUcs > Math.PI / 2.0 + 1e-6 || angInUcs <= -Math.PI / 2.0 + 1e-6)
+                        xAxis = -xAxis;                                // si no, se leeria boca abajo
+                    Vector3d yAxis = zAxis.CrossProduct(xAxis).GetNormal();
+                    Matrix3d toWorld = Matrix3d.AlignCoordinateSystem(
+                        Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis, Vector3d.ZAxis,
+                        textOrigin, xAxis, yAxis, zAxis);
+                    Matrix3d toLocal = toWorld.Inverse();
+
+                    step = "medir el texto";
+                    Box oldBox = MeasureText(textEnt, toLocal);
+
+                    // ---------- 4. Lineas de directriz con EXACTAMENTE lo seleccionado ----------
+                    step = "unir las lineas";
+                    var pieces = curves
+                        .Select(c => Simplify(GetVertices(c).Select(p => ToLocal2d(p, toLocal)).ToList()))
+                        .Where(p => p.Count >= 2)
+                        .ToList();
+                    if (pieces.Count == 0)
+                    {
+                        ed.WriteMessage("\nRDIR: las lineas seleccionadas no tienen longitud.");
+                        return false;
+                    }
+
+                    // trunk = del apoyo (junto al texto) al cruce, o a la punta si no hay
+                    // ramas; branches = del cruce a cada punta
+                    List<Point2d> trunk;
+                    List<List<Point2d>> branches;
+                    double tol = Math.Max(1e-6, height * 1e-3);
+                    if (!BuildTree(pieces, oldBox, tol, 0.5 * height, out trunk, out branches))
+                    {
+                        warnings.Add("las lineas seleccionadas no se tocan; se han unido por sus extremos mas cercanos");
+                        List<Point2d> chain = JoinPieces(pieces);
+                        if (oldBox.DistanceTo(chain[chain.Count - 1]) < oldBox.DistanceTo(chain[0])) chain.Reverse();
+                        trunk = chain;
+                        branches = new List<List<Point2d>>();
+                    }
+                    trunk = Simplify(trunk);
+                    branches = branches.Select(Simplify).ToList();
+
+                    // ---------- 5. Estilo, rellano y subrayado ----------
+                    step = "crear la directriz";
+                    var ml = new MLeader();
+                    ml.SetDatabaseDefaults(db);
+                    if (!db.MLeaderstyle.IsNull) Soft("aplicar el estilo de directriz actual", () => ml.MLeaderStyle = db.MLeaderstyle);
+                    Soft("dejarla no anotativa", () => ml.Annotative = AnnotativeStates.False);
+                    // Todo en unidades reales del dibujo (escala 1), para que la altura
+                    // del texto sea exactamente la del original.
+                    double styleScale = ml.Scale > 0 ? ml.Scale : 1.0;
+                    double styleArrow = ml.ArrowSize * styleScale;
+                    double gap = ml.LandingGap * styleScale;
+
+                    // core = del codo (cola de las lineas) al cruce o a la punta
+                    bool dogleg = false, underline = false;
+                    double doglegDir = 1.0, landLen = 0.0;
+                    List<Point2d> core = trunk;
+                    if (trunk.Count >= 2 && IsAlongText(trunk[0], trunk[1]))
+                    {
+                        Point2d a = trunk[0], b = trunk[1];    // a = apoyo, b = siguiente vertice
+                        double overlap = Math.Min(Math.Max(a.X, b.X), oldBox.MaxX) - Math.Max(Math.Min(a.X, b.X), oldBox.MinX);
+                        bool underText = overlap > 0.5 * oldBox.Width;
+                        double dir = a.X > b.X ? 1.0 : -1.0;   // de b hacia el apoyo (hacia el texto)
+                        if (trunk.Count >= 3 || branches.Count > 0)
+                        {
+                            // raya + codo real: la raya es el rellano
+                            dogleg = true;
+                            underline = underText || textUnderlined;
+                            doglegDir = dir;
+                            landLen = Math.Abs(a.X - b.X);
+                            core = trunk.Skip(1).ToList();
+                        }
+                        else if (underText || textUnderlined)
+                        {
+                            // una sola recta que sigue por debajo del texto: el codo va en
+                            // el borde del texto, y lo que queda bajo el texto es el subrayado
+                            double nearEdge = dir > 0 ? oldBox.MinX : oldBox.MaxX;
+                            double kx = nearEdge - dir * gap;
+                            kx = Math.Max(Math.Min(a.X, b.X), Math.Min(Math.Max(a.X, b.X), kx));
+                            double ky = b.Y + (a.Y - b.Y) * (kx - b.X) / (a.X - b.X);
+                            var knee = new Point2d(kx, ky);
+                            if (knee.GetDistanceTo(b) > 1e-9)
+                            {
+                                dogleg = true;
+                                underline = true;
+                                doglegDir = dir;
+                                landLen = Math.Abs(a.X - kx);
+                                core = new List<Point2d> { knee, b };
+                            }
+                        }
+                    }
+                    if (!dogleg && textUnderlined)
+                    {
+                        // texto subrayado por formato, sin raya propia: el subrayado lo
+                        // dibuja la directriz, saliendo del final de la linea
+                        Point2d t0 = trunk[0];
+                        dogleg = true;
+                        underline = true;
+                        doglegDir = oldBox.MinX + oldBox.MaxX >= 2.0 * t0.X ? 1.0 : -1.0;
+                        landLen = doglegDir > 0 ? oldBox.MaxX - t0.X : t0.X - oldBox.MinX;
+                    }
+                    Point2d tail = core[0];
+
+                    // lineas del MLEADER, cada una de su punta a la cola (el codo)
+                    var coreBack = Enumerable.Reverse(core).ToList();
+                    var lines = new List<List<Point2d>>();
+                    if (branches.Count == 0) lines.Add(Simplify(coreBack));
+                    else
+                        foreach (List<Point2d> br in branches)
+                        {
+                            var l = Enumerable.Reverse(br).ToList();
+                            l.AddRange(coreBack.Skip(1));
+                            lines.Add(Simplify(l));
+                        }
+                    if (lines.Any(l => l.Count < 2))
+                    {
+                        ed.WriteMessage("\nRDIR: las lineas seleccionadas no forman una directriz.");
+                        return false;
+                    }
+
+                    // ---------- 6. Flechas: cada una a la rama de punta mas cercana ----------
+                    step = "leer las flechas";
+                    var arrows = arrowEnts.Select(a => ReadArrow(a, toLocal)).Where(a => a != null).ToList();
+                    var lineArrow = new Arrow[lines.Count];
+                    foreach (Arrow a in arrows)
+                    {
+                        int best = -1;
+                        double bestD = double.MaxValue;
+                        for (int i = 0; i < lines.Count; i++)
+                        {
+                            double d = a.Ref.GetDistanceTo(lines[i][0]);
+                            if (d < bestD) { bestD = d; best = i; }
+                        }
+                        if (best >= 0 && (lineArrow[best] == null || bestD < lineArrow[best].Ref.GetDistanceTo(lines[best][0])))
+                            lineArrow[best] = a;
+                    }
                     for (int i = 0; i < lines.Count; i++)
                     {
-                        double d = a.Ref.GetDistanceTo(lines[i][0]);
-                        if (d < bestD) { bestD = d; best = i; }
+                        Arrow a = lineArrow[i];
+                        if (a == null) continue;
+                        Point2d prev = lines[i][1];
+                        Point2d tip = a.IsSolid ? a.Verts.OrderByDescending(x => x.GetDistanceTo(prev)).First() : a.Ref;
+                        if (tip.GetDistanceTo(prev) > lines[i][0].GetDistanceTo(prev)) lines[i][0] = tip;
                     }
-                    if (best >= 0 && (lineArrow[best] == null || bestD < lineArrow[best].Ref.GetDistanceTo(lines[best][0])))
-                        lineArrow[best] = a;
-                }
-                for (int i = 0; i < lines.Count; i++)
-                {
-                    Arrow a = lineArrow[i];
-                    if (a == null) continue;
-                    Point2d prev = lines[i][1];
-                    Point2d tip = a.IsSolid ? a.Verts.OrderByDescending(x => x.GetDistanceTo(prev)).First() : a.Ref;
-                    if (tip.GetDistanceTo(prev) > lines[i][0].GetDistanceTo(prev)) lines[i][0] = tip;
-                }
 
-                // ---------- 7. Crear el MLEADER directamente en su sitio ----------
-                var owner = (BlockTableRecord)tr.GetObject(textEnt.BlockId, OpenMode.ForWrite);
-                var ml = new MLeader();
-                ml.SetDatabaseDefaults(db);
-                if (!db.MLeaderstyle.IsNull) ml.MLeaderStyle = db.MLeaderstyle;
-                ml.Annotative = AnnotativeStates.False;
-                // plano del MLEADER con su eje X a lo largo del texto: el rellano y
-                // el subrayado siguen esa direccion
-                ml.SetPlane(new Plane(textOrigin, xAxis, yAxis));
-
-                // Todo en unidades reales del dibujo (escala 1), para que la altura
-                // del texto sea exactamente la del original.
-                double styleScale = ml.Scale > 0 ? ml.Scale : 1.0;
-                double styleArrow = ml.ArrowSize * styleScale;
-                double gap = ml.LandingGap * styleScale;
-                ml.Scale = 1.0;
-                ml.ContentType = ContentType.MTextContent;
-                ml.TextStyleId = styleId;
-                ml.TextHeight = height;
-                ml.TextAngleType = TextAngleType.InsertAngle;
-                Arrow firstArrow = lineArrow.FirstOrDefault(a => a != null);
-                ml.ArrowSize = firstArrow != null ? firstArrow.Size : styleArrow;
-                if (firstArrow != null) ml.ArrowSymbolId = firstArrow.Symbol;
-                ml.LandingGap = gap;
-                ml.Layer = textEnt.Layer;
-                ml.Color = textEnt.Color;
-
-                // posicion inicial del texto: del lado del rellano (luego se ajusta)
-                double ix, iy;
-                if (dogleg && underline)
-                {
-                    ix = doglegDir > 0 ? tail.X + gap : tail.X - gap - oldBox.Width;
-                    iy = tail.Y + oldBox.Height + gap;
-                }
-                else if (dogleg)
-                {
-                    ix = doglegDir > 0 ? land.X + gap : land.X - gap - oldBox.Width;
-                    iy = tail.Y + 0.5 * oldBox.Height;
-                }
-                else
-                {
-                    ix = oldBox.MinX;
-                    iy = oldBox.MaxY;
-                }
-
-                var mt = new MText();
-                mt.SetDatabaseDefaults(db);
-                mt.Contents = contents;
-                mt.TextStyleId = styleId;
-                mt.TextHeight = height;
-                mt.Width = mtextWidth;
-                mt.Normal = zAxis;
-                mt.Direction = xAxis;
-                mt.Attachment = AttachmentPoint.TopLeft;
-                mt.Location = World(new Point2d(ix, iy), toWorld);
-                ml.MText = mt;
-
-                // un solo grupo de directriz; una linea por rama, de la punta al codo
-                int leaderIdx = ml.AddLeader();
-                var lineIdx = new List<int>();
-                for (int i = 0; i < lines.Count; i++)
-                {
-                    int ln = ml.AddLeaderLine(leaderIdx);
-                    ml.AddFirstVertex(ln, World(lines[i][0], toWorld));
-                    for (int k = 1; k < lines[i].Count; k++)
-                        ml.AddLastVertex(ln, World(lines[i][k], toWorld));
-                    if (lineArrow[i] != null)
+                    // ---------- 7. Crear el MLEADER directamente en su sitio ----------
+                    step = "crear la directriz";
+                    var owner = (BlockTableRecord)tr.GetObject(textEnt.BlockId, OpenMode.ForWrite);
+                    // plano del MLEADER con su eje X a lo largo del texto: el rellano y
+                    // el subrayado siguen esa direccion
+                    Soft("orientar el plano de la directriz", () => ml.SetPlane(new Plane(textOrigin, xAxis, yAxis)));
+                    Soft("poner la escala general a 1", () => ml.Scale = 1.0);
+                    ml.ContentType = ContentType.MTextContent;
+                    ml.TextStyleId = styleId;
+                    ml.TextHeight = height;
+                    Soft("respetar el angulo del texto", () => ml.TextAngleType = TextAngleType.InsertAngle);
+                    Arrow firstArrow = lineArrow.FirstOrDefault(a => a != null);
+                    Soft("ajustar la flecha", () =>
                     {
-                        // SOLID -> flecha cerrada rellena (simbolo nulo); bloque -> el mismo bloque
-                        ml.SetArrowSize(ln, lineArrow[i].Size);
-                        ml.SetArrowSymbolId(ln, lineArrow[i].Symbol);
+                        ml.ArrowSize = firstArrow != null ? firstArrow.Size : styleArrow;
+                        if (firstArrow != null) ml.ArrowSymbolId = firstArrow.Symbol;
+                    });
+                    Soft("ajustar la separacion del rellano", () => ml.LandingGap = gap);
+                    ml.Layer = textEnt.Layer;
+                    ml.Color = textEnt.Color;
+
+                    // posicion inicial del texto, del lado del rellano (luego se ajusta)
+                    double ix, iy;
+                    if (dogleg && underline)
+                    {
+                        ix = doglegDir > 0 ? tail.X + gap : tail.X - gap - oldBox.Width;
+                        iy = tail.Y + oldBox.Height + gap;
                     }
-                    lineIdx.Add(ln);
-                }
+                    else if (dogleg)
+                    {
+                        ix = doglegDir > 0 ? tail.X + landLen + gap : tail.X - landLen - gap - oldBox.Width;
+                        iy = tail.Y + 0.5 * oldBox.Height;
+                    }
+                    else
+                    {
+                        ix = oldBox.MinX;
+                        iy = oldBox.MaxY;
+                    }
 
-                if (dogleg)
-                {
-                    ml.EnableLanding = true;
-                    ml.EnableDogleg = true;
+                    var mt = new MText();
+                    mt.SetDatabaseDefaults(db);
+                    mt.Contents = contents;
+                    mt.TextStyleId = styleId;
+                    mt.TextHeight = height;
+                    mt.Width = mtextWidth;
+                    mt.Normal = zAxis;
+                    mt.Direction = xAxis;
+                    mt.Attachment = AttachmentPoint.TopLeft;
+                    mt.Location = World(new Point2d(ix, iy), toWorld);
+                    ml.MText = mt;
+
+                    // un solo grupo de directriz; una linea por rama, de la punta al codo
+                    step = "anadir las lineas de directriz";
+                    int leaderIdx = ml.AddLeader();
+                    var lineIdx = new List<int>();
+                    for (int i = 0; i < lines.Count; i++)
+                    {
+                        int ln = ml.AddLeaderLine(leaderIdx);
+                        ml.AddFirstVertex(ln, World(lines[i][0], toWorld));
+                        for (int k = 1; k < lines[i].Count; k++)
+                            ml.AddLastVertex(ln, World(lines[i][k], toWorld));
+                        Arrow la = lineArrow[i];
+                        if (la != null)
+                        {
+                            // SOLID -> flecha cerrada rellena (simbolo nulo); bloque -> el mismo bloque
+                            Soft("ajustar la flecha de una rama", () =>
+                            {
+                                ml.SetArrowSize(ln, la.Size);
+                                ml.SetArrowSymbolId(ln, la.Symbol);
+                            });
+                        }
+                        lineIdx.Add(ln);
+                    }
+
+                    step = "configurar el rellano";
+                    // subrayado solo si el original lo tenia; si no, enganche al centro,
+                    // diga lo que diga el estilo
                     TextAttachmentType att = underline ? TextAttachmentType.AttachmentAllLine : TextAttachmentType.AttachmentMiddle;
-                    ml.SetTextAttachmentType(att, LeaderDirectionType.LeftLeader);
-                    ml.SetTextAttachmentType(att, LeaderDirectionType.RightLeader);
-                    SetDoglegLength(ml, leaderIdx, xAxis * doglegDir, underline ? 0.0 : landLen, height);
+                    Soft("ajustar el enganche del texto", () =>
+                    {
+                        ml.SetTextAttachmentType(att, LeaderDirectionType.LeftLeader);
+                        ml.SetTextAttachmentType(att, LeaderDirectionType.RightLeader);
+                    });
+                    if (dogleg)
+                    {
+                        ml.EnableLanding = true;
+                        ml.EnableDogleg = true;
+                        Soft("ajustar el rellano", () => SetDoglegLength(ml, leaderIdx, xAxis * doglegDir, underline ? 0.0 : landLen, height));
+                    }
+                    else
+                    {
+                        ml.EnableDogleg = false;
+                        ml.EnableLanding = false;
+                    }
+
+                    step = "anadir la directriz al dibujo";
+                    owner.AppendEntity(ml);
+                    tr.AddNewlyCreatedDBObject(ml, true);
+
+                    // Subrayado: rellano + separacion + texto = largo de la raya original
+                    if (dogleg && underline)
+                    {
+                        double w = ContentWidth(ml, toLocal) ?? oldBox.Width;
+                        Soft("ajustar el largo del rellano", () => SetDoglegLength(ml, leaderIdx, xAxis * doglegDir, landLen - w - gap, height));
+                    }
+
+                    // ---------- 8. Enganchar: el final de las lineas, en el codo exacto ----------
+                    Point3d wantTail = World(tail, toWorld);
+                    Soft("colocar el texto junto al codo", () =>
+                    {
+                        for (int pass = 0; pass < 4; pass++)
+                        {
+                            Vector3d delta = wantTail - ml.GetLastVertex(lineIdx[0]);
+                            if (delta.Length < 1e-9) break;
+                            ml.TextLocation = ml.TextLocation + delta;
+                        }
+                    });
+
+                    // ---------- 9. Borrar las piezas sueltas ----------
+                    step = "borrar las piezas sueltas";
+                    textEnt.Erase();
+                    foreach (Curve c in curves) c.Erase();
+                    foreach (Entity a in arrowEnts) a.Erase();
+
+                    tr.Commit();
                 }
-                else
+                catch (System.Exception ex)
                 {
-                    ml.EnableDogleg = false;
-                    ml.EnableLanding = false;
+                    throw new System.Exception($"al {step}: {ex.Message}", ex);
                 }
-
-                owner.AppendEntity(ml);
-                tr.AddNewlyCreatedDBObject(ml, true);
-
-                // Subrayado: rellano + separacion + texto = largo de la raya original
-                if (dogleg && underline)
-                {
-                    double w = ContentWidth(ml, toLocal) ?? oldBox.Width;
-                    SetDoglegLength(ml, leaderIdx, xAxis * doglegDir, landLen - w - gap, height);
-                }
-
-                // ---------- 8. Enganchar: el final de las lineas, en el codo exacto ----------
-                Point3d wantTail = World(tail, toWorld);
-                for (int pass = 0; pass < 4; pass++)
-                {
-                    Vector3d delta = wantTail - ml.GetLastVertex(lineIdx[0]);
-                    if (delta.Length < 1e-9) break;
-                    ml.TextLocation = ml.TextLocation + delta;
-                }
-
-                // ---------- 9. Borrar las piezas sueltas ----------
-                textEnt.Erase();
-                foreach (Curve c in curves) c.Erase();
-                foreach (Entity a in arrowEnts) a.Erase();
-
-                tr.Commit();
-                return true;
             }
+
+            foreach (string w in warnings)
+                ed.WriteMessage($"\nRDIR: aviso, no se pudo {w}.");
+            return true;
+        }
+
+        /// <summary>Tramo paralelo al texto (eje X local), con 0,1 de tolerancia.</summary>
+        private static bool IsAlongText(Point2d a, Point2d b)
+        {
+            double dx = b.X - a.X, dy = b.Y - a.Y;
+            return Math.Abs(dx) > 1e-9 && Math.Abs(dy) <= 0.1 * Math.Abs(dx);
+        }
+
+        /// <summary>Rectangulo del texto original en el sistema local. Primero sobre
+        /// una copia; si AutoCAD no la mide, sobre el propio texto (que luego se
+        /// borra); y si tampoco, con su caja envolvente universal.</summary>
+        private static Box MeasureText(Entity textEnt, Matrix3d toLocal)
+        {
+            if (textEnt is MText omt)
+            {
+                try { return new Box(omt.GetBoundingPoints().Cast<Point3d>().Select(p => p.TransformBy(toLocal))); }
+                catch (System.Exception) { }
+            }
+            try
+            {
+                using (var clone = (Entity)textEnt.Clone())
+                {
+                    clone.TransformBy(toLocal);
+                    Extents3d e = clone.GeometricExtents;
+                    return new Box(new[] { e.MinPoint, e.MaxPoint });
+                }
+            }
+            catch (System.Exception) { }
+            try
+            {
+                Extents3d w = textEnt.GeometricExtents;
+                var corners = new List<Point3d>();
+                foreach (double x in new[] { w.MinPoint.X, w.MaxPoint.X })
+                    foreach (double y in new[] { w.MinPoint.Y, w.MaxPoint.Y })
+                        foreach (double z in new[] { w.MinPoint.Z, w.MaxPoint.Z })
+                            corners.Add(new Point3d(x, y, z).TransformBy(toLocal));
+                return new Box(corners);
+            }
+            catch (System.Exception) { }
+            Point3d o = Point3d.Origin;
+            return new Box(new[] { o, o });
         }
 
         /// <summary>Longitud y direccion del rellano (nunca cero, para no perder la direccion).</summary>
@@ -441,15 +561,16 @@ namespace DirectricesPlugin
 
         /// <summary>
         /// Grafo con los tramos seleccionados (nudos = extremos que coinciden). El
-        /// apoyo es el extremo mas cercano al texto; el tronco va del apoyo al primer
-        /// cruce (o a la punta, si no hay ramas), y cada rama del cruce a una punta.
-        /// Devuelve false si los tramos no forman un unico conjunto conectado.
+        /// apoyo es el nudo mas cercano al texto (si hay varios igual de cerca, se
+        /// prefiere un extremo libre). El tronco va del apoyo al primer cruce (o a la
+        /// punta, si no hay ramas), y cada rama del cruce a una punta. Devuelve false
+        /// si los tramos no forman un unico conjunto conectado.
         /// </summary>
-        private static bool BuildTree(List<List<Point2d>> pieces, Box textBox, double tol,
-            out List<Point2d> trunk, out List<List<Point2d>> lines)
+        private static bool BuildTree(List<List<Point2d>> pieces, Box textBox, double tol, double near,
+            out List<Point2d> trunk, out List<List<Point2d>> branches)
         {
             trunk = null;
-            lines = null;
+            branches = null;
             var nodes = new List<Point2d>();
             var edges = new List<Edge>();
             foreach (List<Point2d> p in pieces)
@@ -461,28 +582,28 @@ namespace DirectricesPlugin
                 if (edges[i].B != edges[i].A) adj[edges[i].B].Add(i);
             }
 
-            // apoyo: el extremo libre mas cercano al texto (o el nudo mas cercano)
-            var leaves = Enumerable.Range(0, nodes.Count).Where(n => adj[n].Count == 1).ToList();
-            var candidates = leaves.Count > 0 ? leaves : Enumerable.Range(0, nodes.Count).ToList();
-            int landNode = candidates.OrderBy(n => textBox.DistanceTo(nodes[n])).First();
+            // apoyo
+            double dmin = nodes.Min(n => textBox.DistanceTo(n));
+            var close = Enumerable.Range(0, nodes.Count).Where(n => textBox.DistanceTo(nodes[n]) <= dmin + near).ToList();
+            var closeLeaves = close.Where(n => adj[n].Count == 1).ToList();
+            int landNode = (closeLeaves.Count > 0 ? closeLeaves : close).OrderBy(n => textBox.DistanceTo(nodes[n])).First();
 
             // todos los tramos deben estar conectados con el apoyo
             var seen = new HashSet<int> { landNode };
             var queue = new Queue<int>();
             queue.Enqueue(landNode);
-            int reachedEdges = 0;
             var edgeSeen = new HashSet<int>();
             while (queue.Count > 0)
             {
                 int n = queue.Dequeue();
                 foreach (int ei in adj[n])
                 {
-                    if (edgeSeen.Add(ei)) reachedEdges++;
+                    edgeSeen.Add(ei);
                     int o = edges[ei].Other(n);
                     if (seen.Add(o)) queue.Enqueue(o);
                 }
             }
-            if (reachedEdges != edges.Count) return false;
+            if (edgeSeen.Count != edges.Count) return false;
 
             // tronco: del apoyo mientras no haya cruce
             var used = new HashSet<int>();
@@ -499,30 +620,9 @@ namespace DirectricesPlugin
             }
 
             // ramas: todos los caminos desde el cruce hasta una punta
-            var branches = new List<List<Point2d>>();
+            branches = new List<List<Point2d>>();
             CollectBranches(edges, adj, cur, new List<Point2d> { nodes[cur] }, used, branches);
-
-            lines = new List<List<Point2d>>();
-            if (branches.Count == 0)
-            {
-                // una sola linea: el tronco entero, de la punta al apoyo
-                var l = new List<Point2d>(trunk);
-                l.Reverse();
-                lines.Add(Simplify(l));
-            }
-            else
-            {
-                var back = new List<Point2d>(trunk);
-                back.Reverse();                               // cruce -> apoyo
-                foreach (List<Point2d> b in branches)
-                {
-                    var l = new List<Point2d>(b);
-                    l.Reverse();                              // punta -> cruce
-                    l.AddRange(back.Skip(1));                 // ... -> apoyo
-                    lines.Add(Simplify(l));
-                }
-            }
-            return lines.All(l => l.Count >= 2);
+            return trunk.Count >= 2 || branches.Count > 0;
         }
 
         private static void CollectBranches(List<Edge> edges, List<List<int>> adj, int node,
@@ -682,20 +782,22 @@ namespace DirectricesPlugin
             return r;
         }
 
-        /// <summary>Texto de un TEXT -> contenido de MTEXT: escapa \ { } y convierte
-        /// los conmutadores %%u (subrayado) y %%o (sobrerrayado), que MTEXT no
-        /// entiende; %%c, %%d, %%p y %%nnn se dejan tal cual (MTEXT si los entiende).</summary>
-        private static string DbTextToMText(string s)
+        /// <summary>Texto de un TEXT -> contenido de MTEXT: escapa \ { }, quita el
+        /// subrayado %%u (lo dibuja la directriz, si no saldria doble) y convierte el
+        /// sobrerrayado %%o; %%c, %%d, %%p y %%nnn se dejan tal cual (MTEXT si los
+        /// entiende).</summary>
+        private static string DbTextToMText(string s, out bool underlined)
         {
             var sb = new StringBuilder();
-            bool under = false, over = false;
+            bool over = false;
+            underlined = false;
             for (int i = 0; i < s.Length; i++)
             {
                 char c = s[i];
                 if (c == '%' && i + 2 < s.Length && s[i + 1] == '%')
                 {
                     char k = char.ToLowerInvariant(s[i + 2]);
-                    if (k == 'u') { under = !under; sb.Append(under ? "\\L" : "\\l"); i += 2; continue; }
+                    if (k == 'u') { underlined = true; i += 2; continue; }
                     if (k == 'o') { over = !over; sb.Append(over ? "\\O" : "\\o"); i += 2; continue; }
                 }
                 if (c == '\\') sb.Append("\\\\");
@@ -705,5 +807,29 @@ namespace DirectricesPlugin
             }
             return sb.ToString();
         }
+
+        /// <summary>Quita los codigos de subrayado \L ... \l de un contenido de MTEXT
+        /// (el subrayado lo dibuja la directriz; si no, saldria doble).</summary>
+        private static string StripMTextUnderline(string s, out bool underlined)
+        {
+            var sb = new StringBuilder();
+            underlined = false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char k = s[i + 1];
+                    if (k == 'L') { underlined = true; i++; continue; }
+                    if (k == 'l') { i++; continue; }
+                    sb.Append(c).Append(k);   // cualquier otro codigo (incluido \\) se deja igual
+                    i++;
+                    continue;
+                }
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
     }
 }

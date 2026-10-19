@@ -124,6 +124,15 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
    - Si la raya **acababa junto al texto**, queda un rellano normal, con el
      texto a continuación y centrado en su altura.
 
+   - Si la línea **sigue recta por debajo del texto** (raya y línea a la
+     flecha en prolongación), el codo se pone en el borde del texto: lo que
+     queda bajo el texto es el subrayado.
+   - Si el texto estaba **subrayado por formato** (`%%u` en un TEXT o `\L` en
+     un MTEXT), ese subrayado se quita del texto y lo dibuja la propia
+     directriz, para que no salga **doble**.
+   - Si el original **no** estaba subrayado, la directriz nueva tampoco, diga
+     lo que diga el estilo de directriz múltiple actual.
+
    El texto se coloca como lo haría AutoCAD en una directriz nativa, y se
    desplaza hasta que el final de las líneas cae **exactamente en el codo
    original**. Si no hay rellano, el texto queda junto al apoyo, donde estaba.
@@ -132,8 +141,12 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
    escala.
 6. **Borra** el texto, las líneas y la flecha originales.
 
-Si algo falla al reconstruir una directriz, no se cambia nada de ella. El
-comando lo avisa y sigue con la siguiente.
+Si AutoCAD rechaza un ajuste secundario (el plano, la flecha, el rellano...),
+la directriz se crea igualmente y el comando lo indica con un mensaje
+`RDIR: aviso, no se pudo ...`. Si falla un paso imprescindible, no se cambia
+nada de esa directriz: el mensaje dice en qué paso falló (por ejemplo
+`al anadir las lineas de directriz: eInvalidContext`) y el comando sigue con la
+siguiente. Si te pasa, mándame ese mensaje.
 
 ---
 
