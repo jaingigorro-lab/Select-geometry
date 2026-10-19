@@ -3,38 +3,43 @@
 ;; ==========================================================
 ;; RDIRX - Reconstruye directrices EXPLOTADAS (texto + lineas/polilineas +
 ;; flecha SOLID/INSERT sueltas) como directrices multiples (MLEADER) reales,
-;; con el mismo texto, la misma altura, la misma capa y la MISMA ORIENTACION
-;; que el texto original.
+;; con el mismo texto, la misma altura y la misma capa que el original.
 ;;
-;; Como funciona:
-;;   1. Une las lineas/polilineas seleccionadas en CADENAS (tramos que se
-;;      tocan por sus extremos), en los dos sentidos, de modo que cada
-;;      directriz original queda como una sola cadena con sus codos.
-;;   2. Empareja cada texto con la cadena que tiene un EXTREMO mas cerca del
-;;      rectangulo REAL del texto (girado con el, no la caja envolvente
-;;      alineada con el SCU, que en un texto girado es enorme y "tocaba"
-;;      lineas ajenas). El emparejamiento es global: primero las parejas mas
-;;      cercanas de todo el lote, sin repetir texto ni cadena.
-;;   3. El extremo de la cadena pegado al texto es el apoyo; el otro, la
-;;      punta. Si en la punta hay un SOLID o un INSERT pequeno, es la flecha
-;;      vieja (y si la linea acababa en la base del SOLID, la punta nueva se
-;;      lleva a su vertice).
-;;   4. Crea el MLEADER en el SISTEMA DEL PROPIO TEXTO (su plano y su
-;;      angulo), no en el SCU: el texto nuevo queda orientado igual que el
-;;      original, aunque se dibujara en un SCP girado o "visto desde abajo".
-;;   5. Si el ultimo tramo era el subrayado horizontal bajo el texto
-;;      (texto apoyado sobre una linea), lo convierte en el rellano del
-;;      MLEADER con el texto subrayado, en lugar de un tramo mas.
+;; Como funciona, para cada texto:
+;;   1. Busca el tramo con un extremo mas cerca del rectangulo REAL del texto
+;;      (girado con el), a menos de 4 alturas de texto. El emparejamiento es
+;;      global: primero las parejas texto-tramo mas cercanas de todo el lote.
+;;   2. Desde ahi sigue la directriz tramo a tramo, SOLO por lineas de la
+;;      MISMA CAPA y el MISMO COLOR que el primer tramo, y se detiene:
+;;        - al llegar a la flecha (SOLID o bloque pequeno pegado al extremo),
+;;        - donde el camino se bifurca (dos o mas tramos posibles),
+;;        - o donde ya no hay continuacion.
+;;      Asi no se "come" lineas del dibujo que toquen la directriz.
+;;   3. Si junto al texto hay un subrayado (texto escrito sobre una raya y la
+;;      diagonal saliendo de un extremo), lo incluye y lo convierte en el
+;;      rellano del MLEADER, con el texto subrayado.
+;;   4. Crea el MLEADER con el texto HORIZONTAL EN EL SCP ACTUAL (como la
+;;      directriz nativa de AutoCAD), o, con la opcion "Original",
+;;      conservando el angulo y el plano del texto original.
+;;
+;; Si el estilo de directriz multiple actual es anotativo, la directriz nueva
+;; se deja NO anotativa, para que el texto tenga exactamente la altura real
+;; del original (si no, AutoCAD la multiplicaria por la escala de anotacion).
 ;;
 ;; Todo el lote se deshace con un solo U, Esc no deja nada a medias y se
 ;; ignoran los objetos en capas bloqueadas.
 ;;
-;; Uso: APPLOAD -> RDIRX -> selecciona textos, lineas/polilineas y flechas.
+;; Uso: APPLOAD -> RDIRX -> elige orientacion -> selecciona textos,
+;; lineas/polilineas y flechas.
 ;; ==========================================================
+
+(if (null *rdirx-orient*) (setq *rdirx-orient* "Scp"))
 
 ;; ---------- vectores ----------
 
 (defun rdirx:v- (a b) (mapcar '- a b))
+(defun rdirx:v+ (a b) (mapcar '+ a b))
+(defun rdirx:vs (v s) (mapcar '(lambda (x) (* x s)) v))
 (defun rdirx:dot (a b) (apply '+ (mapcar '* a b)))
 (defun rdirx:cross (a b)
   (list (- (* (cadr a) (caddr b)) (* (caddr a) (cadr b)))
@@ -42,7 +47,20 @@
         (- (* (car a) (cadr b)) (* (cadr a) (car b)))))
 (defun rdirx:unit (v / l)
   (setq l (distance '(0.0 0.0 0.0) v))
-  (if (> l 1e-12) (mapcar '(lambda (x) (/ x l)) v) v))
+  (if (> l 1e-12) (rdirx:vs v (/ 1.0 l)) v))
+
+;; Distancia de un punto a un segmento (3D).
+(defun rdirx:seg-dist (p a b / ab l2 k)
+  (setq ab (rdirx:v- b a) l2 (rdirx:dot ab ab))
+  (if (< l2 1e-18)
+    (distance p a)
+    (progn
+      (setq k (max 0.0 (min 1.0 (/ (rdirx:dot (rdirx:v- p a) ab) l2))))
+      (distance p (rdirx:v+ a (rdirx:vs ab k))))))
+
+;; Distancia de un punto a una caja alineada (min max), 0 si esta dentro.
+(defun rdirx:dist-aabb (p box)
+  (distance p (mapcar '(lambda (x lo hi) (max lo (min hi x))) p (car box) (cadr box))))
 
 ;; ---------- geometria de las piezas ----------
 
@@ -67,16 +85,27 @@
          (setq r (cons (vlax-curve-getPointAtParam ent i) r) i (1+ i)))
        (reverse r)))))
 
+;; Capa y color (256 = PorCapa) de una entidad.
+(defun rdirx:props (ent / ed)
+  (setq ed (entget ent))
+  (list (strcase (cdr (assoc 8 ed))) (cond ((cdr (assoc 62 ed))) (256))))
+
 ;; Caja envolvente (WCS) de un objeto: (minimo maximo), o nil si AutoCAD no
 ;; puede calcularla.
 (defun rdirx:box (obj / mn mx)
   (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-GetBoundingBox (list obj 'mn 'mx))))
     (list (vlax-safearray->list mn) (vlax-safearray->list mx))))
 
-;; Vertices (WCS) de un SOLID.
+;; Vertices (WCS) de un SOLID, en el orden de sus aristas.
 (defun rdirx:solid-pts (ent / ed)
   (setq ed (entget ent))
-  (mapcar '(lambda (k) (trans (cdr (assoc k ed)) ent 0)) '(10 11 12 13)))
+  (mapcar '(lambda (k) (trans (cdr (assoc k ed)) ent 0)) '(10 11 13 12)))
+
+;; Distancia de un punto al contorno de un SOLID.
+(defun rdirx:solid-dist (p ent / v)
+  (setq v (rdirx:solid-pts ent))
+  (min (rdirx:seg-dist p (nth 0 v) (nth 1 v)) (rdirx:seg-dist p (nth 1 v) (nth 2 v))
+       (rdirx:seg-dist p (nth 2 v) (nth 3 v)) (rdirx:seg-dist p (nth 3 v) (nth 0 v))))
 
 ;; Sistema PROPIO de un texto: (origen ejeX ejeY ejeZ xmin xmax ymin ymax),
 ;; todo en WCS salvo el rectangulo, que va en coordenadas locales del texto
@@ -106,7 +135,7 @@
           ymin (- (* 0.5 row h) h)       ymax (+ ymin h)))
   (list O X (rdirx:unit (rdirx:cross N X)) N xmin xmax ymin ymax))
 
-;; Punto WCS -> coordenadas locales del sistema fr.
+;; Punto WCS -> coordenadas locales del sistema fr (origen ejeX ejeY ejeZ ...).
 (defun rdirx:local (p fr / d)
   (setq d (rdirx:v- p (car fr)))
   (list (rdirx:dot d (nth 1 fr)) (rdirx:dot d (nth 2 fr)) (rdirx:dot d (nth 3 fr))))
@@ -118,44 +147,108 @@
         dy (max 0.0 (- (nth 6 fr) (cadr l)) (- (cadr l) (nth 7 fr))))
   (sqrt (+ (* dx dx) (* dy dy))))
 
-;; Alarga "chain" por su ultimo punto con tramos no usados que empiecen o
-;; terminen ahi. Usa y modifica curves, usedC, ents y tol de c:RDIRX
-;; (ambito dinamico de AutoLISP).
-(defun rdirx:grow (chain / found ci pts)
-  (setq found T)
-  (while found
-    (setq found nil ci 0)
-    (foreach cv curves
-      (if (and (not found) (not (member ci usedC)))
-        (progn
-          (setq pts (cadr cv))
-          (cond
-            ((<= (distance (car pts) (last chain)) tol)
-             (setq found T chain (append chain (cdr pts))))
-            ((<= (distance (last pts) (last chain)) tol)
-             (setq found T chain (append chain (cdr (reverse pts))))))
-          (if found (setq usedC (cons ci usedC) ents (cons (car cv) ents)))))
-      (setq ci (1+ ci))))
-  chain)
+;; ---------- seguimiento de la directriz ----------
+;; Estas funciones leen curves, arrows, usedA y tol de c:RDIRX (ambito
+;; dinamico de AutoLISP).
+
+;; Flecha (SOLID, o INSERT pequeno) pegada al punto p, o nil.
+(defun rdirx:arrow-at (p th / best bd d b)
+  (setq bd (* 0.25 th))
+  (foreach ar arrows
+    (if (and (not (member ar usedA)) (entget ar))
+      (progn
+        (if (= (cdr (assoc 0 (entget ar))) "SOLID")
+          (setq d (rdirx:solid-dist p ar))
+          (setq b (rdirx:box (vlax-ename->vla-object ar))
+                d (if (and b (< (distance (car b) (cadr b)) (* 4.0 th))) (rdirx:dist-aabb p b) 1e99)))
+        (if (<= d bd) (setq bd d best ar)))))
+  best)
+
+;; Indices de los tramos no tomados, de esa capa y color, que tocan p.
+(defun rdirx:cands (p taken lay col / ci r)
+  (setq ci 0)
+  (foreach cv curves
+    (if (and (not (member ci taken))
+             (equal (nth 2 cv) (list lay col))
+             (or (<= (distance (car (cadr cv)) p) tol) (<= (distance (last (cadr cv)) p) tol)))
+      (setq r (cons ci r)))
+    (setq ci (1+ ci)))
+  r)
+
+;; Puntos del tramo ci empezando por su extremo mas cercano a p.
+(defun rdirx:oriented (ci p / pts)
+  (setq pts (cadr (nth ci curves)))
+  (if (<= (distance (car pts) p) (distance (last pts) p)) pts (reverse pts)))
+
+;; Alarga la cadena por su final hasta la flecha, una bifurcacion o el fin.
+;; Devuelve (cadena tomados flecha).
+(defun rdirx:grow-fwd (chain taken lay col th / c n arr)
+  (setq n 0)
+  (while (and (not (setq arr (rdirx:arrow-at (last chain) th)))
+              (< n 10)
+              (= (length (setq c (rdirx:cands (last chain) taken lay col))) 1))
+    (setq chain (append chain (cdr (rdirx:oriented (car c) (last chain))))
+          taken (cons (car c) taken)
+          n (1+ n)))
+  (list chain taken arr))
+
+;; Alarga la cadena por su principio (lado del texto) solo con tramos que
+;; siguen pegados al texto (el subrayado). Devuelve (cadena tomados).
+(defun rdirx:grow-back (chain taken lay col tf th / c pts n go)
+  (setq n 0 go T)
+  (while (and go (< n 3) (= (length (setq c (rdirx:cands (car chain) taken lay col))) 1))
+    (setq pts (rdirx:oriented (car c) (car chain)))
+    (if (<= (rdirx:dist-text (last pts) tf) (* 4.0 th))
+      (setq chain (append (reverse (cdr pts)) chain)
+            taken (cons (car c) taken)
+            n (1+ n))
+      (setq go nil)))
+  (list chain taken))
+
+;; Directriz del texto ti empezando por el tramo ci. Prueba los dos sentidos
+;; del tramo y se queda con el que llega a una flecha (o, si ninguno, con el
+;; que acaba mas lejos del texto). Devuelve (cadena tomados flecha), con la
+;; cadena del apoyo (junto al texto) a la punta.
+(defun rdirx:build (ti ci / tf th lp pA ra rb best bk)
+  (setq tf (cadr (nth ti txts))
+        th (caddr (nth ti txts))
+        lp (nth 2 (nth ci curves))
+        pA (cadr (nth ci curves))
+        pA (if (<= (rdirx:dist-text (car pA) tf) (rdirx:dist-text (last pA) tf)) pA (reverse pA))
+        ra (rdirx:grow-fwd pA (cons ci usedC) (car lp) (cadr lp) th))
+  (if (<= (rdirx:dist-text (last pA) tf) (* 4.0 th))
+    (setq rb (rdirx:grow-fwd (reverse pA) (cons ci usedC) (car lp) (cadr lp) th)))
+  (setq best ra)
+  (if (and rb (> (+ (if (caddr rb) 1e9 0.0) (rdirx:dist-text (last (car rb)) tf))
+                 (+ (if (caddr ra) 1e9 0.0) (rdirx:dist-text (last (car ra)) tf))))
+    (setq best rb))
+  (setq bk (rdirx:grow-back (car best) (cadr best) (car lp) (cadr lp) tf th))
+  (list (car bk) (cadr bk) (caddr best)))
 
 ;; ---------- comando ----------
 
-(defun c:RDIRX ( / *error* doc ss i ent typ obj txts curves arrows comps pairs
-                   usedT usedC assigned ti ci fr th tol tolA chain ents pts d
-                   bestD arrowEnt prev tip lpts a b dog dlen ddir space ml sa
-                   rot count minTh)
-  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+(defun c:RDIRX ( / *error* doc oldEcho kw ss i ent typ obj txts curves arrows
+                   pairs usedT usedC usedA jobs ti ci r newC tf mf th tol
+                   chain arr prev tip lpts a b dog dlen ddir space ml mle sa
+                   rot count minTh ux uy)
+  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
+        oldEcho (getvar "CMDECHO"))
 
   (defun *error* (msg)
+    (setvar "CMDECHO" oldEcho)
     (vla-EndUndoMark doc)
     (if (not (wcmatch (strcase msg) "*BREAK*,*CANCEL*,*EXIT*"))
       (princ (strcat "\n[RDIRX] Error: " msg)))
     (princ))
 
+  (initget "Scp Original")
+  (if (setq kw (getkword (strcat "\n[RDIRX] Orientacion del texto [Scp/Original] <" *rdirx-orient* ">: ")))
+    (setq *rdirx-orient* kw))
+
   (prompt "\n[RDIRX] Selecciona las directrices explotadas (textos, lineas/polilineas y flechas): ")
   (if (setq ss (ssget "_:L" '((0 . "TEXT,MTEXT,LINE,LWPOLYLINE,POLYLINE,LEADER,SOLID,INSERT"))))
     (progn
-      ;; 1. Clasificar: txts = (ent sistema altura), curves = (ent puntos)
+      ;; 1. Clasificar: txts = (ent sistema altura), curves = (ent puntos (capa color))
       (setq i 0)
       (repeat (sslength ss)
         (setq ent (ssname ss i)
@@ -167,8 +260,8 @@
                  txts (cons (list ent (rdirx:frame ent) th) txts)
                  minTh (if minTh (min minTh th) th)))
           ((wcmatch typ "LINE,LWPOLYLINE,POLYLINE,LEADER")
-           (if (>= (length (setq pts (rdirx:pts ent))) 2)
-             (setq curves (cons (list ent pts) curves))))
+           (if (>= (length (setq r (rdirx:pts ent))) 2)
+             (setq curves (cons (list ent r (rdirx:props ent)) curves))))
           (T (setq arrows (cons ent arrows)))))
       (setq txts (reverse txts) curves (reverse curves))
 
@@ -176,127 +269,116 @@
         (princ "\n[RDIRX] Faltan datos: la seleccion debe incluir textos y lineas.")
         (progn
           (vla-StartUndoMark doc)
+          (setq tol (max 1e-6 (* 0.05 minTh)))
 
-          ;; 2. Unir los tramos en cadenas (en los dos sentidos)
-          (setq tol (max 1e-6 (* 0.1 minTh)) ci 0)
-          (foreach cv curves
-            (if (not (member ci usedC))
-              (progn
-                (setq usedC (cons ci usedC)
-                      ents  (list (car cv))
-                      chain (rdirx:grow (cadr cv))
-                      chain (reverse (rdirx:grow (reverse chain)))
-                      comps (cons (list chain ents) comps))))
-            (setq ci (1+ ci)))
-          (setq comps (reverse comps))
-
-          ;; 3. Emparejar texto <-> cadena por la distancia de un EXTREMO de la
-          ;;    cadena al rectangulo real del texto
+          ;; 2. Parejas texto <-> tramo por distancia de un extremo al texto
           (setq ti 0)
           (foreach tx txts
-            (setq ci 0 fr (cadr tx) th (caddr tx))
-            (foreach cp comps
-              (setq chain (car cp)
-                    a (rdirx:dist-text (car chain) fr)
-                    b (rdirx:dist-text (last chain) fr))
-              (if (<= (min a b) (* 4.0 th))
-                (setq pairs (cons (list (min a b) ti ci (< b a)) pairs)))
+            (setq ci 0 tf (cadr tx) th (caddr tx))
+            (foreach cv curves
+              (setq a (min (rdirx:dist-text (car (cadr cv)) tf)
+                           (rdirx:dist-text (last (cadr cv)) tf)))
+              (if (<= a (* 4.0 th)) (setq pairs (cons (list a ti ci) pairs)))
               (setq ci (1+ ci)))
             (setq ti (1+ ti)))
           (setq pairs (vl-sort pairs '(lambda (p q) (< (car p) (car q)))))
+
+          ;; 3. Seguir cada directriz, de la pareja mas cercana a la mas lejana
           (foreach pr pairs
-            (if (and (not (member (nth 1 pr) usedT)) (not (member (nth 2 pr) assigned)))
-              (setq usedT (cons (nth 1 pr) usedT)
-                    assigned (cons (nth 2 pr) assigned)
-                    comps (subst (append (nth (nth 2 pr) comps) (list (nth 1 pr) (nth 3 pr)))
-                                 (nth (nth 2 pr) comps) comps))))
-          (setq count 0)
-
-          ;; 4. Reconstruir cada directriz
-          (foreach cp comps
-            (if (>= (length cp) 4)
+            (if (and (not (member (cadr pr) usedT)) (not (member (caddr pr) usedC)))
               (progn
-                (setq ti    (nth 2 cp)
-                      ent   (car (nth ti txts))
-                      fr    (cadr (nth ti txts))
-                      th    (caddr (nth ti txts))
-                      tolA  (* 2.0 th)
-                      ents  (cadr cp)
-                      ;; cadena del apoyo (junto al texto) a la punta
-                      chain (if (nth 3 cp) (reverse (car cp)) (car cp)))
+                (setq r    (rdirx:build (cadr pr) (caddr pr))
+                      newC (vl-remove-if '(lambda (x) (member x usedC)) (cadr r))
+                      usedT (cons (cadr pr) usedT)
+                      usedC (cadr r))
+                (if (caddr r) (setq usedA (cons (caddr r) usedA)))
+                (setq jobs (cons (list (cadr pr) (car r) (caddr r)
+                                       (mapcar '(lambda (x) (car (nth x curves))) newC))
+                                 jobs)))))
+          (setq jobs (reverse jobs) count 0
+                ux (rdirx:unit (getvar "UCSXDIR"))
+                uy (rdirx:unit (getvar "UCSYDIR")))
 
-                ;; flecha vieja en la punta
-                (setq bestD 1e99 arrowEnt nil prev (nth (- (length chain) 2) chain))
-                (foreach ar arrows
-                  (if (entget ar)
-                    (progn
-                      (if (= (cdr (assoc 0 (entget ar))) "SOLID")
-                        (setq d (apply 'min (mapcar '(lambda (p) (distance p (last chain))) (rdirx:solid-pts ar))))
-                        (setq d (distance (trans (cdr (assoc 10 (entget ar))) ar 0) (last chain))
-                              ;; un INSERT solo cuenta como flecha si es pequeno
-                              b (rdirx:box (vlax-ename->vla-object ar))
-                              d (if (and b (< (apply 'distance b) (* 4.0 th))) d 1e99)))
-                      (if (and (< d tolA) (< d bestD)) (setq bestD d arrowEnt ar)))))
-                (if (and arrowEnt (= (cdr (assoc 0 (entget arrowEnt))) "SOLID"))
+          ;; 4. Crear los MLEADER
+          (foreach jb jobs
+            (setq ent   (car (nth (car jb) txts))
+                  tf    (cadr (nth (car jb) txts))
+                  th    (caddr (nth (car jb) txts))
+                  chain (cadr jb)
+                  arr   (caddr jb)
+                  prev  (nth (- (length chain) 2) chain))
+
+            ;; llevar la punta al vertice real de la flecha vieja
+            (if arr
+              (progn
+                (setq tip (if (= (cdr (assoc 0 (entget arr))) "SOLID")
+                            (car (vl-sort (rdirx:solid-pts arr)
+                                          '(lambda (p q) (> (distance p prev) (distance q prev)))))
+                            (trans (cdr (assoc 10 (entget arr))) arr 0)))
+                (if (> (distance tip prev) (distance (last chain) prev))
+                  (setq chain (append (reverse (cdr (reverse chain))) (list tip))))))
+
+            ;; sistema del MLEADER: SCP actual, o el del propio texto
+            (setq mf (if (= *rdirx-orient* "Original")
+                       (list (car tf) (nth 1 tf) (nth 2 tf) (nth 3 tf))
+                       (list (car tf) ux uy (rdirx:unit (rdirx:cross ux uy))))
+                  lpts (mapcar '(lambda (p / l) (setq l (rdirx:local p mf)) (list (car l) (cadr l) 0.0))
+                               (reverse chain))
+                  dog nil)
+
+            ;; subrayado bajo el texto -> rellano del MLEADER
+            (if (>= (length lpts) 3)
+              (progn
+                (setq a (nth (- (length lpts) 2) lpts)   ; codo
+                      b (last lpts))                     ; extremo junto al texto
+                (if (and (> (abs (- (car b) (car a))) 1e-9)
+                         (<= (abs (- (cadr b) (cadr a))) (* 0.1 (abs (- (car b) (car a))))))
+                  (setq dog  T
+                        dlen (max (* 0.2 th) (- (abs (- (car b) (car a))) (- (nth 5 tf) (nth 4 tf))))
+                        ddir (if (> (car b) (car a)) 1.0 -1.0)
+                        lpts (reverse (cdr (reverse lpts)))))))
+
+            (setq r  (apply 'append lpts)
+                  sa (vlax-make-safearray vlax-vbDouble (cons 0 (1- (length r)))))
+            (vlax-safearray-fill sa r)
+            (setq obj   (vlax-ename->vla-object ent)
+                  space (vlax-ename->vla-object (cdr (assoc 330 (entget ent))))
+                  ml    (vl-catch-all-apply 'vla-AddMLeader (list space (vlax-make-variant sa) 0)))
+            (if (vl-catch-all-error-p ml)
+              (princ (strcat "\n[RDIRX] No se pudo crear una directriz: " (vl-catch-all-error-message ml)))
+              (progn
+                ;; estilo anotativo: dejarla no anotativa para que la altura sea la real
+                (setq mle (vlax-vla-object->ename ml))
+                (if (assoc -3 (entget mle '("AcadAnnotative")))
                   (progn
-                    (setq tip (car (vl-sort (rdirx:solid-pts arrowEnt)
-                                            '(lambda (p q) (> (distance p prev) (distance q prev))))))
-                    (if (> (distance tip prev) (distance (last chain) prev))
-                      (setq chain (append (reverse (cdr (reverse chain))) (list tip))))))
-
-                ;; puntos en el sistema del texto (plano del texto, Z local = 0),
-                ;; de la punta al apoyo
-                (setq lpts (mapcar '(lambda (p / l) (setq l (rdirx:local p fr)) (list (car l) (cadr l) 0.0))
-                                   (reverse chain))
-                      dog nil)
-
-                ;; subrayado bajo el texto -> rellano del MLEADER
-                (if (>= (length lpts) 3)
+                    (setvar "CMDECHO" 0)
+                    (vl-catch-all-apply 'vl-cmdf (list "_.CHPROP" mle "" "_Annotative" "_No" ""))
+                    (setvar "CMDECHO" oldEcho)))
+                (vl-catch-all-apply 'vla-put-ContentType (list ml 2)) ; 2 = acMTextContent
+                (vla-put-TextString ml (vla-get-TextString obj))
+                (vla-put-Layer ml (vla-get-Layer obj))
+                (vl-catch-all-apply 'vla-put-TextHeight (list ml th))
+                (vl-catch-all-apply 'vla-put-TextRotation (list ml 0.0))
+                (if dog
                   (progn
-                    (setq a (nth (- (length lpts) 2) lpts)   ; codo
-                          b (last lpts))                     ; extremo junto al texto
-                    (if (and (> (abs (- (car b) (car a))) 1e-9)
-                             (<= (abs (- (cadr b) (cadr a))) (* 0.1 (abs (- (car b) (car a))))))
-                      (setq dog  T
-                            dlen (max (* 0.2 th) (- (abs (- (car b) (car a))) (- (nth 5 fr) (nth 4 fr))))
-                            ddir (if (> (car b) (car a)) 1.0 -1.0)
-                            lpts (reverse (cdr (reverse lpts)))))))
+                    (vl-catch-all-apply 'vla-put-DogLegged (list ml :vlax-true))
+                    (vl-catch-all-apply 'vla-put-DoglegLength (list ml dlen))
+                    (vl-catch-all-apply 'vla-SetDoglegDirection (list ml 0 (vlax-3d-point (list ddir 0.0 0.0))))
+                    ;; 8 = acAttachmentAllLine: texto subrayado, como el original
+                    (vl-catch-all-apply 'vla-put-TextLeftAttachmentType (list ml 8))
+                    (vl-catch-all-apply 'vla-put-TextRightAttachmentType (list ml 8)))
+                  (vl-catch-all-apply 'vla-put-DogLegged (list ml :vlax-false)))
 
-                (setq pts (apply 'append lpts)
-                      sa  (vlax-make-safearray vlax-vbDouble (cons 0 (1- (length pts)))))
-                (vlax-safearray-fill sa pts)
-                (setq obj   (vlax-ename->vla-object ent)
-                      space (vlax-ename->vla-object (cdr (assoc 330 (entget ent))))
-                      ml    (vl-catch-all-apply 'vla-AddMLeader (list space (vlax-make-variant sa) 0)))
-                (if (vl-catch-all-error-p ml)
-                  (princ (strcat "\n[RDIRX] No se pudo crear una directriz: " (vl-catch-all-error-message ml)))
-                  (progn
-                    (vl-catch-all-apply 'vla-put-ContentType (list ml 2)) ; 2 = acMTextContent
-                    (vla-put-TextString ml (vla-get-TextString obj))
-                    (vla-put-Layer ml (vla-get-Layer obj))
-                    (vl-catch-all-apply 'vla-put-TextHeight (list ml th))
-                    (vl-catch-all-apply 'vla-put-TextRotation (list ml 0.0))
-                    (if dog
-                      (progn
-                        (vl-catch-all-apply 'vla-put-DogLegged (list ml :vlax-true))
-                        (vl-catch-all-apply 'vla-put-DoglegLength (list ml dlen))
-                        (vl-catch-all-apply 'vla-SetDoglegDirection (list ml 0 (vlax-3d-point (list ddir 0.0 0.0))))
-                        ;; 8 = acAttachmentAllLine: texto subrayado, como el original
-                        (vl-catch-all-apply 'vla-put-TextLeftAttachmentType (list ml 8))
-                        (vl-catch-all-apply 'vla-put-TextRightAttachmentType (list ml 8)))
-                      (vl-catch-all-apply 'vla-put-DogLegged (list ml :vlax-false)))
+                ;; llevar el MLEADER del plano XY al sistema elegido
+                (setq rot (mapcar '(lambda (k)
+                                     (list (nth k (nth 1 mf)) (nth k (nth 2 mf)) (nth k (nth 3 mf)) (nth k (car mf))))
+                                  '(0 1 2)))
+                (vla-TransformBy ml (vlax-tmatrix (append rot '((0.0 0.0 0.0 1.0)))))
 
-                    ;; llevar el MLEADER del plano XY al sistema del texto
-                    (setq rot (mapcar '(lambda (k)
-                                         (list (nth k (nth 1 fr)) (nth k (nth 2 fr)) (nth k (nth 3 fr)) (nth k (car fr))))
-                                      '(0 1 2)))
-                    (vla-TransformBy ml (vlax-tmatrix (append rot '((0.0 0.0 0.0 1.0)))))
-
-                    (entdel ent)
-                    (foreach c ents (if (entget c) (entdel c)))
-                    (if arrowEnt (entdel arrowEnt))
-                    (setq arrows (vl-remove arrowEnt arrows)
-                          count (1+ count)))))))
+                (entdel ent)
+                (foreach c (nth 3 jb) (if (entget c) (entdel c)))
+                (if (and arr (entget arr)) (entdel arr))
+                (setq count (1+ count)))))
 
           (vla-EndUndoMark doc)
           (princ (strcat "\n[RDIRX] " (itoa count) " directriz(es) reconstruida(s)"

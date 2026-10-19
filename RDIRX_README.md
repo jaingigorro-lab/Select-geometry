@@ -50,12 +50,15 @@ Las piezas sueltas originales se borran al terminar.
    directrices nuevas usarán ese estilo: tipo de flecha, tamaño de flecha,
    fuente, etc.
 2. Escribe `RDIRX`.
-3. **Selecciona** todas las piezas de las directrices que quieras reconstruir:
+3. **Elige la orientación del texto** (ver más abajo): Intro para `Scp`
+   (texto horizontal en el SCP actual) o `O` para `Original`. Se recuerda la
+   última elección.
+4. **Selecciona** todas las piezas de las directrices que quieras reconstruir:
    los textos, las líneas o polilíneas y las flechas. Puedes coger muchas
    directrices de una vez con una **ventana de selección**: el programa sabe
    qué texto va con qué línea.
-4. Pulsa **Intro**.
-5. En la línea de comandos verás el resultado, por ejemplo:
+5. Pulsa **Intro**.
+6. En la línea de comandos verás el resultado, por ejemplo:
    `[RDIRX] 12 directriz(es) reconstruida(s); 1 texto(s) sin linea cercana, sin tocar.`
 
 Si el resultado no te convence, escribe **`U`** una sola vez: se deshace todo
@@ -77,37 +80,54 @@ Los objetos en **capas bloqueadas** se ignoran: ni se usan ni se borran.
 
 ## Cómo decide qué va con qué
 
-1. **Cadenas.** Primero une las líneas y polilíneas que se tocan por sus
-   extremos (tolerancia: 0,1 veces la altura de texto más pequeña), en los dos
-   sentidos. Cada directriz original queda como una sola cadena con todos sus
-   codos.
-2. **Texto ↔ cadena.** Para cada texto busca la cadena con un **extremo** a
-   menos de **4 alturas de texto** del rectángulo **real** del texto, girado
-   con él. No usa la caja alineada con el SCU, que en un texto girado es
-   enorme y tocaría líneas ajenas. Empareja primero las parejas más cercanas
-   de todo el lote, sin repetir texto ni cadena.
-3. **Apoyo y punta.** El extremo de la cadena pegado al texto es el apoyo; el
-   otro, la punta.
-4. **Flecha.** Busca un `SOLID` o un `INSERT` pegado a la punta, a menos de
-   2 alturas de texto. Un `INSERT` solo cuenta como flecha si es **pequeño**
-   (menos de 4 alturas de texto de tamaño), para no borrar un bloque normal
-   que se haya colado en la selección. Si la línea acababa en la base de un
-   `SOLID`, la punta nueva se coloca en el vértice real de la flecha.
+1. **Texto ↔ primer tramo.** Para cada texto busca el tramo con un
+   **extremo** a menos de **4 alturas de texto** del rectángulo **real** del
+   texto, girado con él. No usa la caja alineada con el SCU, que en un texto
+   girado es enorme y tocaría líneas ajenas. Empareja primero las parejas más
+   cercanas de todo el lote, sin repetir texto ni tramo.
+2. **Seguir la directriz.** Desde ese tramo sigue los tramos que empiezan
+   donde termina el anterior, **solo por líneas de la misma capa y el mismo
+   color** que el primer tramo. Se detiene:
+   - al llegar a la **flecha**,
+   - donde el camino se **bifurca** (dos o más tramos posibles),
+   - o donde ya no hay continuación.
+
+   Así no se "come" contornos ni otras líneas del dibujo que toquen la
+   directriz.
+3. **Apoyo y punta.** El extremo pegado al texto es el apoyo; el otro, la
+   punta. Si el primer tramo tiene los dos extremos junto al texto (un
+   subrayado), prueba los dos sentidos y se queda con el que llega a una
+   flecha.
+4. **Flecha.** Es un `SOLID` o un `INSERT` **pegado** a la punta (a menos de
+   0,25 alturas de texto de su contorno). Un `INSERT` solo cuenta como flecha
+   si es **pequeño** (menos de 4 alturas de texto), para no borrar un bloque
+   normal que se haya colado en la selección. Si la línea acababa en la base
+   de un `SOLID`, la punta nueva se coloca en el vértice real de la flecha.
 
 ## Orientación del texto
 
-La directriz nueva se crea en el **sistema del propio texto original** (su
-plano y su ángulo), no en el SCU. El texto queda orientado igual que estaba,
-aunque se hubiera escrito en un SCP girado o con el plano invertido ("visto
-desde abajo").
+Al empezar, `RDIRX` pregunta `Orientacion del texto [Scp/Original] <Scp>:`.
+
+- **Scp** *(por defecto)*: el texto queda **horizontal en el SCP actual**,
+  como si dibujaras la directriz a mano con `MLEADER`. Si trabajas en un SCP
+  girado, el texto sale recto en pantalla.
+- **Original**: conserva el **ángulo y el plano del texto original**, aunque
+  estuviera girado.
 
 ## Texto apoyado sobre una línea (subrayado)
 
-Si el tramo junto al texto es una línea **horizontal respecto al texto** (el
-típico texto escrito encima de una raya, con la diagonal saliendo de un
-extremo), ese tramo se convierte en el **rellano** de la directriz múltiple y
-el texto queda **subrayado**, como en el original. Así la directriz se
-comporta como una nativa: si mueves el texto, el subrayado lo acompaña.
+Si el tramo junto al texto es una línea **horizontal** (el típico texto
+escrito encima de una raya, con la diagonal saliendo de un extremo), ese tramo
+se convierte en el **rellano** de la directriz múltiple y el texto queda
+**subrayado**, como en el original. Así la directriz se comporta como una
+nativa: si mueves el texto, el subrayado lo acompaña.
+
+## Altura del texto y estilos anotativos
+
+La directriz nueva lleva la **altura real** del texto original. Si el estilo de
+directriz múltiple actual es **anotativo**, la directriz se deja **no
+anotativa**: si no, AutoCAD multiplicaría la altura por la escala de anotación
+y el texto saldría gigante.
 
 ---
 
@@ -115,7 +135,7 @@ comporta como una nativa: si mueves el texto, el subrayado lo acompaña.
 
 - **Posición del texto.** La directriz múltiple coloca el texto junto a su
   apoyo según su estilo (separación, enganche), así que puede quedar
-  ligeramente desplazado respecto al original. La orientación sí se conserva.
+  ligeramente desplazado respecto al original.
 - **Sin subrayado no hay rellano.** Si el último tramo no es horizontal
   respecto al texto, la directriz se crea sin rellano, apoyando el texto en el
   último punto. Si lo quieres, en Propiedades pon **Rellano horizontal: Sí**.
@@ -126,9 +146,9 @@ comporta como una nativa: si mueves el texto, el subrayado lo acompaña.
   puestas a mano dentro del MTEXT, la directriz nueva las hereda. Para
   quitarlas, usa `StripMtext` (`SMT`) sobre las directrices nuevas,
   marcando *Height* y *Font*.
-- **Estilo anotativo.** Si el estilo de directriz múltiple actual es
-  anotativo, la altura del texto puede no aplicarse tal cual. Usa un estilo no
-  anotativo o revisa la escala de anotación después.
+- **Directrices de varias capas.** Si los tramos de una misma directriz
+  original están en capas o colores distintos, solo se sigue el primero.
+  Unifícalos antes (`MATCHPROP`) y repite.
 - **Arcos en polilíneas.** Los tramos curvos de una polilínea se convierten en
   tramos rectos entre sus vértices.
 - **Prueba primero.** Haz la primera prueba en una copia del dibujo o sobre
@@ -143,6 +163,8 @@ comporta como una nativa: si mueves el texto, el subrayado lo acompaña.
 |---|---|---|
 | `Faltan datos: la seleccion debe incluir textos y lineas.` | En la selección no había textos o no había líneas. | Vuelve a seleccionar incluyendo ambos. |
 | `N texto(s) sin linea cercana, sin tocar.` | La línea de esos textos está a más de 4 alturas de texto, o en una capa bloqueada. | Acerca el texto, desbloquea la capa o selecciona también esa línea. |
-| La flecha vieja no se ha borrado. | Estaba a más de 2 alturas de texto de la punta, o es un bloque grande. | Bórrala a mano. |
+| La flecha vieja no se ha borrado. | No tocaba la punta de la línea, o es un bloque grande. | Bórrala a mano. |
+| La directriz nueva se queda corta (le falta un tramo). | El tramo siguiente está en otra capa o color, o en ese punto el camino se bifurca. | Unifica capa y color de los tramos con `MATCHPROP` y repite. |
+| El texto sale girado. | Elegiste `Original` y el texto original estaba girado. | Repite con `Scp`. |
 | `No se pudo crear una directriz: …` | El estilo de directriz múltiple actual da problemas. | Pon como actual el estilo `Standard` y repite. |
 | Las flechas nuevas salen muy grandes o muy pequeñas. | Es el tamaño de flecha del estilo de directriz múltiple actual. | Ajusta el estilo en `MLEADERSTYLE`. |
