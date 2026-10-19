@@ -13,6 +13,7 @@
          AutoCAD reference assemblies themselves (they must resolve against the real ones
          already loaded inside AutoCAD.exe at runtime). -->
     <GenerateDependencyFile>false</GenerateDependencyFile>
+    <Platforms>AnyCPU;x64</Platforms>
   </PropertyGroup>
 
   <ItemGroup>
