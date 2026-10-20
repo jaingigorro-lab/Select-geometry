@@ -443,17 +443,21 @@ namespace DirectricesPlugin
                     // dibujar el subrayado y el rellano por separado: doble raya).
                     TextAttachmentType att = underline ? TextAttachmentType.AttachmentBottomLine : TextAttachmentType.AttachmentMiddle;
 
-                    // AutoCAD no acepta siempre la misma forma de anadir varias lineas a una
-                    // directriz (eInvalidContext). Se prueban, por orden, varias formas
-                    // documentadas, cada una sobre un MLEADER nuevo, y se usa la primera que
-                    // AutoCAD acepta. Con una sola linea, las formas 2 y 4 son la 1.
+                    // Cada linea de directriz lleva solo SUS vertices (la punta y los quiebros
+                    // intermedios), NUNCA el codo: el final de las lineas es el punto de
+                    // enganche del rellano, que gestiona AutoCAD y que viaja con el texto.
+                    // Si el codo se anadiera como vertice, quedaria fijo al mover el texto
+                    // (las lineas se doblarian en el sitio viejo) y AutoCAD rechaza una
+                    // segunda linea que acabe en el (eInvalidContext). Se prueban varias
+                    // formas documentadas de crear las lineas, cada una sobre un MLEADER
+                    // nuevo, y se usa la primera que AutoCAD acepta.
                     step = "anadir las lineas de directriz";
                     MLeader ml = null;
                     List<int> lineIdx = null, clusters = null;
                     var failures = new List<string>();
-                    for (int strategy = 1; strategy <= 4 && ml == null; strategy++)
+                    for (int strategy = 1; strategy <= 3 && ml == null; strategy++)
                     {
-                        if (lines.Count == 1 && (strategy == 2 || strategy == 4)) continue;
+                        if (lines.Count == 1 && strategy == 2) continue;
                         var aw = new List<string>();
                         MLeader cand = null;
                         try
@@ -518,26 +522,15 @@ namespace DirectricesPlugin
                                 // cada linea se crea por su punta y AutoCAD la asigna al grupo
                                 foreach (List<Point2d> l in lines)
                                 {
+                                    int own = l.Count - 1;   // vertices propios: todos menos el codo
                                     int ln = cand.AddLeaderLine(World(l[0], toWorld));
-                                    for (int k = 1; k < l.Count; k++) cand.AddLastVertex(ln, World(l[k], toWorld));
+                                    for (int k = 1; k < own; k++) cand.AddLastVertex(ln, World(l[k], toWorld));
                                     // si AutoCAD anadio un vertice propio, se dejan exactamente los nuestros
-                                    while (cand.VerticesCount(ln) > l.Count) cand.RemoveLastVertex(ln);
-                                    for (int k = 0; k < l.Count; k++) cand.SetVertex(ln, k, World(l[k], toWorld));
+                                    while (cand.VerticesCount(ln) > own) cand.RemoveLastVertex(ln);
+                                    for (int k = 0; k < own; k++) cand.SetVertex(ln, k, World(l[k], toWorld));
                                     li.Add(ln);
                                     int ld = cand.GetLeaderIndex(ln);
                                     if (!cl.Contains(ld)) cl.Add(ld);
-                                }
-                            }
-                            else
-                            {
-                                // ultimo recurso: un grupo por rama, con los rellanos superpuestos
-                                foreach (List<Point2d> l in lines)
-                                {
-                                    int ld = cand.AddLeader();
-                                    cl.Add(ld);
-                                    int ln = cand.AddLeaderLine(ld);
-                                    AddVertices(cand, ln, l, toWorld);
-                                    li.Add(ln);
                                 }
                             }
 
@@ -597,30 +590,36 @@ namespace DirectricesPlugin
                             Soft("ajustar el largo del rellano", () => SetDoglegLength(ml, ld, xAxis * doglegDir, landLen - w - gap, height));
                     }
 
-                    // ---------- 8. Enganchar: el final de las lineas, en el codo exacto ----------
+                    // ---------- 8. Enganchar: el rellano, en el codo exacto ----------
+                    // Se mide donde DIBUJA AutoCAD el final de la primera linea (el enganche
+                    // del rellano) y se desplaza el texto, que arrastra al rellano, hasta
+                    // que ese punto cae en el codo original.
+                    step = "colocar el texto";
                     Point3d wantTail = World(tail, toWorld);
-                    Soft("colocar el texto junto al codo", () =>
+                    List<Point2d> l0 = lines[0];
+                    Point3d lastOwn = World(l0[l0.Count - 2], toWorld);
+                    Point3d? prevOwn = l0.Count >= 3 ? World(l0[l0.Count - 3], toWorld) : (Point3d?)null;
+                    double arrow0 = lineArrow[0] != null ? lineArrow[0].Size : styleArrow;
+                    // si el ultimo vertice propio es la punta, la linea puede empezar
+                    // recortada por la flecha: se acepta esa holgura
+                    double nearTol = (l0.Count == 2 ? 1.5 * arrow0 : 0.0) + Math.Max(1e-6, 1e-3 * height);
+                    bool placed = false;
+                    for (int pass = 0; pass < 4; pass++)
                     {
-                        for (int pass = 0; pass < 4; pass++)
+                        Point3d? at = DrawnConnection(ml, lastOwn, prevOwn, nearTol);
+                        if (!at.HasValue) break;
+                        Vector3d delta = wantTail - at.Value;
+                        if (delta.Length < Math.Max(1e-6, 1e-4 * height)) { placed = true; break; }
+                        Point3d loc = ml.TextLocation;
+                        ml.TextLocation = loc + delta;
+                        Point3d? after = DrawnConnection(ml, lastOwn, prevOwn, nearTol);
+                        if (!after.HasValue || (after.Value - at.Value).Length < 1e-9)
                         {
-                            Point3d before = ml.GetLastVertex(lineIdx[0]);
-                            Vector3d delta = wantTail - before;
-                            if (delta.Length < 1e-9) break;
-                            Point3d loc = ml.TextLocation;
-                            ml.TextLocation = loc + delta;
-                            // si el final de las lineas no acompana al texto, se deshace el
-                            // movimiento: el texto no debe alejarse del codo
-                            if ((ml.GetLastVertex(lineIdx[0]) - before).Length < 1e-9)
-                            {
-                                ml.TextLocation = loc;
-                                break;
-                            }
+                            ml.TextLocation = loc;   // el rellano no acompana al texto: se deja
+                            break;
                         }
-                    });
-                    // y, si aun asi el final no esta en el codo, se lleva cada linea a el
-                    if ((ml.GetLastVertex(lineIdx[0]) - wantTail).Length > 1e-6)
-                        foreach (int ln in lineIdx)
-                            Soft("llevar la linea al codo", () => ml.SetLastVertex(ln, wantTail));
+                    }
+                    if (!placed) warnings.Add("ajustar el texto para que el rellano caiga exactamente en el codo original (revisa su posicion)");
 
                     // ---------- 9. Borrar las piezas sueltas ----------
                     step = "borrar las piezas sueltas";
@@ -649,12 +648,53 @@ namespace DirectricesPlugin
             catch (System.Exception ex) { warnings.Add($"{what} ({ex.Message})"); }
         }
 
-        /// <summary>Vertices de una linea de directriz recien creada: la punta como
-        /// cabeza y el resto, por orden, hasta el codo.</summary>
+        /// <summary>Vertices PROPIOS de una linea de directriz recien creada: la punta
+        /// como cabeza y los quiebros intermedios, por orden. El ultimo punto (el codo)
+        /// no se anade: es el enganche del rellano, que pone AutoCAD.</summary>
         private static void AddVertices(MLeader ml, int ln, List<Point2d> l, Matrix3d toWorld)
         {
             ml.AddFirstVertex(ln, World(l[0], toWorld));
-            for (int k = 1; k < l.Count; k++) ml.AddLastVertex(ln, World(l[k], toWorld));
+            for (int k = 1; k < l.Count - 1; k++) ml.AddLastVertex(ln, World(l[k], toWorld));
+        }
+
+        /// <summary>Punto donde AutoCAD dibuja el final de una linea de directriz (su
+        /// enganche con el rellano o con el texto): el otro extremo del tramo que sale
+        /// del ultimo vertice propio de la linea, segun la geometria que dibuja el
+        /// MLEADER (se descompone en memoria, sin tocar el dibujo).</summary>
+        private static Point3d? DrawnConnection(MLeader ml, Point3d lastOwn, Point3d? prevOwn, double nearTol)
+        {
+            var parts = new DBObjectCollection();
+            try
+            {
+                ml.Explode(parts);
+                Point3d? best = null;
+                double bestD = double.MaxValue;
+                foreach (DBObject o in parts)
+                {
+                    if (!(o is Curve c)) continue;
+                    List<Point3d> v = GetVertices(c);
+                    for (int i = 0; i + 1 < v.Count; i++)
+                    {
+                        Point3d a = v[i], b = v[i + 1];
+                        for (int side = 0; side < 2; side++)
+                        {
+                            Point3d near = side == 0 ? a : b, far = side == 0 ? b : a;
+                            double d = near.DistanceTo(lastOwn);
+                            if (d > nearTol || d >= bestD) continue;
+                            // no confundirlo con el tramo que vuelve al vertice anterior
+                            if (prevOwn.HasValue && far.DistanceTo(prevOwn.Value) <= nearTol) continue;
+                            bestD = d;
+                            best = far;
+                        }
+                    }
+                }
+                return best;
+            }
+            catch (System.Exception) { return null; }
+            finally
+            {
+                foreach (DBObject o in parts) o.Dispose();
+            }
         }
 
         /// <summary>Tramo paralelo al texto (eje X local), con 0,1 de tolerancia.</summary>

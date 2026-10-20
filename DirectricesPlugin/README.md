@@ -135,6 +135,11 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
    - Si el original **no** estaba subrayado, la directriz nueva tampoco, diga
      lo que diga el estilo de directriz múltiple actual.
 
+   Cada línea de directriz guarda solo sus propios vértices (la punta y sus
+   quiebros), como una directriz nativa: el codo es el enganche del rellano y
+   viaja con el texto. Por eso, al mover la directriz con sus pinzamientos, las
+   líneas siguen al texto y no se quedan dobladas en el sitio antiguo.
+
    El texto se coloca como lo haría AutoCAD en una directriz nativa, y se
    desplaza hasta que el final de las líneas cae **exactamente en el codo
    original**. Si no hay rellano, el texto queda junto al apoyo, donde estaba.
