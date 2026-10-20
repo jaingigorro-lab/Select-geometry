@@ -438,8 +438,10 @@ namespace DirectricesPlugin
                         iy = oldBox.MaxY;
                     }
                     // subrayado solo si el original lo tenia; si no, enganche al centro,
-                    // diga lo que diga el estilo
-                    TextAttachmentType att = underline ? TextAttachmentType.AttachmentAllLine : TextAttachmentType.AttachmentMiddle;
+                    // diga lo que diga el estilo. "Subrayar linea inferior" deja una sola
+                    // raya bajo el texto (con "Subrayar todo el texto" AutoCAD puede
+                    // dibujar el subrayado y el rellano por separado: doble raya).
+                    TextAttachmentType att = underline ? TextAttachmentType.AttachmentBottomLine : TextAttachmentType.AttachmentMiddle;
 
                     // AutoCAD no acepta siempre la misma forma de anadir varias lineas a una
                     // directriz (eInvalidContext). Se prueban, por orden, varias formas
@@ -601,11 +603,24 @@ namespace DirectricesPlugin
                     {
                         for (int pass = 0; pass < 4; pass++)
                         {
-                            Vector3d delta = wantTail - ml.GetLastVertex(lineIdx[0]);
+                            Point3d before = ml.GetLastVertex(lineIdx[0]);
+                            Vector3d delta = wantTail - before;
                             if (delta.Length < 1e-9) break;
-                            ml.TextLocation = ml.TextLocation + delta;
+                            Point3d loc = ml.TextLocation;
+                            ml.TextLocation = loc + delta;
+                            // si el final de las lineas no acompana al texto, se deshace el
+                            // movimiento: el texto no debe alejarse del codo
+                            if ((ml.GetLastVertex(lineIdx[0]) - before).Length < 1e-9)
+                            {
+                                ml.TextLocation = loc;
+                                break;
+                            }
                         }
                     });
+                    // y, si aun asi el final no esta en el codo, se lleva cada linea a el
+                    if ((ml.GetLastVertex(lineIdx[0]) - wantTail).Length > 1e-6)
+                        foreach (int ln in lineIdx)
+                            Soft("llevar la linea al codo", () => ml.SetLastVertex(ln, wantTail));
 
                     // ---------- 9. Borrar las piezas sueltas ----------
                     step = "borrar las piezas sueltas";

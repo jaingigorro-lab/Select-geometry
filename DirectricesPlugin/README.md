@@ -130,6 +130,8 @@ Los objetos en capas bloqueadas no se pueden seleccionar.
    - Si el texto estaba **subrayado por formato** (`%%u` en un TEXT o `\L` en
      un MTEXT), ese subrayado se quita del texto y lo dibuja la propia
      directriz, para que no salga **doble**.
+   - El subrayado usa el enganche **"Subrayar línea inferior"** del estilo de
+     directriz múltiple: una sola raya bajo el texto, unida al rellano.
    - Si el original **no** estaba subrayado, la directriz nueva tampoco, diga
      lo que diga el estilo de directriz múltiple actual.
 
